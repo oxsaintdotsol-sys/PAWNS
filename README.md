@@ -38,15 +38,16 @@ The system is built on Python 3.11+ using `python-telegram-bot` (v22.8) and PyMo
 
 ### 🧭 Navigation & Information
 - **Access Interactive Main Menu (`/start`, `/menu`)**: Easy-to-use inline keyboards for quick navigation between services and user account tools.
-- **Company & Risk Information**: View detailed descriptions of PAWNS services (`/about`), read Terms of Service and Risk Disclosures (`/terms`), or connect directly with administrator support (`/support`).
+- **Company & Risk Information**: View detailed descriptions of PAWNS services (`/about`), read complete in-bot Terms of Service and Risk Disclosures (`/terms` with one-click navigation to Private Investment Terms), or connect directly with administrator support (`/support` routing directly to Telegram DM `@Moyin_13`).
+- **Identity & Role Check (`/id`, `/myid`, `/whoami`)**: Check your Telegram ID, username, and active administrative status.
 
 ### 📈 Trading Onboarding
 - **Crypto Futures**:
   - **BingX Partner Track**: Register using the official PAWNS BingX partner link, submit your BingX UID, and gain complimentary VIP trading access upon admin verification.
   - **Other Exchanges Track**: Choose between 1-Month ($100) or 3-Month ($149.9) subscription plans.
 - **Forex (Live Brokers & Prop Firms)**:
-  - **Live Brokers**: View recommended partner brokers (Exness, HFM, Deriv) with direct registration links.
-  - **Prop Firms**: Explore partnered prop firms (Naira Trader, Naira Prop, Global Dollar Prop) with custom discount links.
+  - **Live Brokers**: View recommended partner brokers (Exness and HFM) with direct registration links.
+  - **Prop Firms**: Explore partnered prop firms (Naira Trader and Naira Prop) with custom affiliate links.
   - **Flexible Payment Methods**: Pay via Crypto (USDT on BSC/Tron) or Nigerian Naira (Bank Transfer) at live-configured exchange rates.
 - **Synthetic Indices**:
   - Step-by-step onboarding for Deriv synthetic trading signals.
@@ -82,7 +83,12 @@ The system is built on Python 3.11+ using `python-telegram-bot` (v22.8) and PyMo
 
 ## 3. What an Admin Can Do
 
-Only Telegram User IDs specified in the `ADMIN_CHAT_IDS` environment variable have access to admin commands and notifications.
+### 🔐 Dual-Source Administrator Detection
+The system detects administrators through a hybrid architecture combining static bootstrap and dynamic database privileges:
+1. **Bootstrap Admins (`ADMIN_CHAT_IDS`)**: Defined in the environment variables as a comma-separated list of numeric Telegram User IDs. These IDs have permanent super-admin access.
+2. **Dynamic Database Admins (`users.is_admin = True`)**: Admins can be added and revoked on the fly via bot commands (`/addadmin`, `/removeadmin`) without restarting the bot or redeploying.
+3. **Security Feedback**: If an unauthorized user attempts an admin command, the bot replies with their specific Telegram ID and instructions to request authorization. Admins can also inspect their identity anytime using `/id` or `/myid`.
+4. **Admin Control Center**: Authorized admins see an extra **🛠 Admin Control Center** button on the main menu, or can access it via `/admin` / `/panel`.
 
 ### ⚡ Real-Time Admin DM Alerts
 - **Instant Payment Notifications**: Admins receive comprehensive DMs immediately upon submission:
@@ -98,12 +104,17 @@ Only Telegram User IDs specified in the `ADMIN_CHAT_IDS` environment variable ha
   - 1-click approval or rejection of submitted BingX UIDs.
   - Review and approve/reject investor withdrawal and termination requests.
 
-### 🛠️ Administrator Commands
+### 🛠️ Administrator Commands & Control Center
 
 | Command | Usage | Description |
 | :--- | :--- | :--- |
+| `/admin` or `/panel` | `/admin` | Opens the interactive **Admin Control Center** (Stats, Pending Queue, Settings, Admin Roles, Audit Trail). |
+| `/announcement` | `/announcement` | Initiates an official broadcast flow with structured preview and confirmation buttons before delivering to all bot users. |
+| `/admins` | `/admins` | Lists all authorized administrators (both environment bootstrap and database roles). |
+| `/addadmin` | `/addadmin <telegram_id>` | Dynamically grants administrator privileges to a Telegram user. |
+| `/removeadmin` | `/removeadmin <telegram_id>` | Revokes dynamic administrator privileges from a user. |
 | `/stats` | `/stats` | Displays live metrics: total registered users, active investors, pending/approved payments, conversion rates, and total referral commissions paid. |
-| `/admin` or `/settings` | `/admin` | Displays current dynamic configuration stored in MongoDB (wallets, fees, rates, and active links). |
+| `/settings` | `/settings` | Displays current dynamic configuration stored in MongoDB (wallets, fees, rates, and active links). |
 | `/addinvestmentprofit` | `/addinvestmentprofit <investor_id> <profit_amount> [note]` | Records an investment profit event for an investor. Automatically calculates the 10% referral commission, logs it in `db.commissions`, credits the referrer, and notifies them via DM. |
 | `/addcommission` | `/addcommission <referrer_id> <amount> <currency> [note]` | Manually credits referral commission to any user. |
 | `/setwallet` | `/setwallet <crypto\|forex\|investment> <address>` | Dynamically updates receiving wallet address without bot restarts. |
@@ -112,9 +123,10 @@ Only Telegram User IDs specified in the `ADMIN_CHAT_IDS` environment variable ha
 | `/setmininvest` | `/setmininvest <amount>` | Adjusts the minimum private investment threshold. |
 | `/setnairarate` | `/setnairarate <rate>` | Updates the USD to NGN exchange rate for Naira bank payments. |
 | `/setinstructions` | `/setinstructions <investment\|trading> <text>` | Updates payment instructions displayed to users. |
-| `/setlink` | `/setlink <key> <url>` | Dynamically updates external links stored in MongoDB (`bingx`, `broker`, `prop`, `synthetic`, `support`, `terms`, `investment_terms`). |
+| `/setlink` | `/setlink <key> <url>` | Dynamically updates external links stored in MongoDB (`bingx`, `broker_1`, `broker_2`, `prop_1`, `prop_2`, `support`, etc.). |
 | `/checkexpiry` | `/checkexpiry` | Manually triggers the subscription expiry check across all active subscribers. |
 | `/audit` | `/audit [limit]` | Displays the most recent entries from the administrative audit log. |
+| `/report` | `/report` | Generates a CSV data export of transactions and investor records. |
 
 ---
 

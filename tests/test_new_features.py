@@ -40,7 +40,31 @@ from pawnstrading_bot import (
     admin_add_investment_profit,
     show_referral,
     show_referral_tiers,
+    is_admin_user,
+    require_admin,
+    cmd_my_id,
+    admin_panel_menu,
+    admin_add_admin,
+    admin_remove_admin,
+    admin_list_admins,
+    show_support,
+    show_terms,
+    show_investment_terms,
+    show_forex_live,
+    show_forex_prop,
+    main_menu_keyboard,
+    format_announcement_message,
+    admin_announcement_start,
+    receive_announcement_text,
+    admin_announcement_proceed,
+    admin_announcement_cancel,
+    ANNOUNCEMENT_TEXT_INPUT,
+    ANNOUNCEMENT_CONFIRM,
+    ConversationHandler,
+    USER_COMMANDS,
+    ADMIN_COMMANDS,
 )
+from telegram.error import Forbidden
 
 
 class TestNewFeatures(unittest.TestCase):
@@ -608,6 +632,297 @@ class TestNewFeatures(unittest.TestCase):
         finally:
             loop.close()
 
+    def test_admin_auth_and_management(self):
+        """Verify dual-source admin detection (env + db), access control, /myid, and role management."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            admin_id = 123456789
+            regular_user_id = 999888777
+            new_admin_id = 555444333
+
+            # 1. Verification of is_admin_user
+            self.assertTrue(is_admin_user(admin_id, self.context))
+            self.assertFalse(is_admin_user(regular_user_id, self.context))
+
+            # 2. require_admin for non-admin responds with denied message containing ID
+            non_admin_update = MagicMock()
+            non_admin_update.effective_user.id = regular_user_id
+            non_admin_update.callback_query = None
+            non_admin_update.effective_message.reply_text = AsyncMock()
+
+            result = loop.run_until_complete(require_admin(non_admin_update, self.context))
+            self.assertFalse(result)
+            denied_msg = non_admin_update.effective_message.reply_text.call_args[0][0]
+            self.assertIn("Access Denied", denied_msg)
+            self.assertIn(str(regular_user_id), denied_msg)
+            self.assertIn(f"/addadmin {regular_user_id}", denied_msg)
+
+            # 3. Add admin dynamically via admin_add_admin
+            admin_update = MagicMock()
+            admin_update.effective_user.id = admin_id
+            admin_update.effective_message.reply_text = AsyncMock()
+            self.context.args = [str(new_admin_id)]
+
+            loop.run_until_complete(admin_add_admin(admin_update, self.context))
+            # Now new_admin_id is admin
+            self.assertTrue(is_admin_user(new_admin_id, self.context))
+
+            # 4. Check /id command for user
+            id_update = MagicMock()
+            id_update.effective_user.id = new_admin_id
+            id_update.effective_user.first_name = "New"
+            id_update.effective_user.last_name = "Admin"
+            id_update.effective_user.username = "new_admin_user"
+            id_update.effective_message.reply_text = AsyncMock()
+
+            loop.run_until_complete(cmd_my_id(id_update, self.context))
+            id_text = id_update.effective_message.reply_text.call_args[0][0]
+            self.assertIn(str(new_admin_id), id_text)
+            self.assertIn("Administrator", id_text)
+
+            # 5. admin_remove_admin cannot remove bootstrap env admin
+            self.context.args = [str(admin_id)]
+            admin_update.effective_message.reply_text.reset_mock()
+            loop.run_until_complete(admin_remove_admin(admin_update, self.context))
+            cant_remove_msg = admin_update.effective_message.reply_text.call_args[0][0]
+            self.assertIn("Cannot revoke", cant_remove_msg)
+            self.assertTrue(is_admin_user(admin_id, self.context))
+
+            # 6. admin_remove_admin can remove database admin
+            self.context.args = [str(new_admin_id)]
+            admin_update.effective_message.reply_text.reset_mock()
+            loop.run_until_complete(admin_remove_admin(admin_update, self.context))
+            removed_msg = admin_update.effective_message.reply_text.call_args[0][0]
+            self.assertIn("Admin Removed", removed_msg)
+            self.assertFalse(is_admin_user(new_admin_id, self.context))
+
+            # 7. Main menu keyboard admin button visibility
+            kb_user = main_menu_keyboard(is_admin_user=False)
+            user_buttons = [btn.text for row in kb_user.inline_keyboard for btn in row]
+            self.assertNotIn("🛠 Admin Control Center", user_buttons)
+
+            kb_admin = main_menu_keyboard(is_admin_user=True)
+            admin_buttons = [btn.text for row in kb_admin.inline_keyboard for btn in row]
+            self.assertIn("🛠 Admin Control Center", admin_buttons)
+
+            # 8. Role-scoped slash command isolation
+            user_cmd_names = [cmd.command for cmd in USER_COMMANDS]
+            self.assertNotIn("admin", user_cmd_names)
+            self.assertNotIn("stats", user_cmd_names)
+            self.assertNotIn("announcement", user_cmd_names)
+            self.assertNotIn("addadmin", user_cmd_names)
+            self.assertNotIn("removeadmin", user_cmd_names)
+            self.assertIn("start", user_cmd_names)
+            self.assertIn("menu", user_cmd_names)
+            self.assertIn("support", user_cmd_names)
+
+            admin_cmd_names = [cmd.command for cmd in ADMIN_COMMANDS]
+            self.assertIn("admin", admin_cmd_names)
+            self.assertIn("stats", admin_cmd_names)
+            self.assertIn("announcement", admin_cmd_names)
+            self.assertIn("addadmin", admin_cmd_names)
+            self.assertIn("removeadmin", admin_cmd_names)
+        finally:
+            loop.close()
+
+    def test_support_routing_and_in_bot_terms(self):
+        """Verify support DM routing to @Moyin_13 and full in-bot legal terms display."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            update = MagicMock()
+            update.effective_user.id = 999111
+            update.callback_query = None
+            update.effective_message.reply_text = AsyncMock()
+
+            # Support routing
+            loop.run_until_complete(show_support(update, self.context))
+            call_kwargs = update.effective_message.reply_text.call_args.kwargs
+            sent_text = call_kwargs.get("text") or update.effective_message.reply_text.call_args[0][0]
+            kb = call_kwargs.get("reply_markup") or update.effective_message.reply_text.call_args[0][1]
+            self.assertIn("@Moyin_13", sent_text)
+            support_url = kb.inline_keyboard[0][0].url
+            self.assertEqual(support_url, "https://t.me/Moyin_13")
+
+            # General terms of service & risk disclosure
+            update.effective_message.reply_text.reset_mock()
+            loop.run_until_complete(show_terms(update, self.context))
+            call_kwargs = update.effective_message.reply_text.call_args.kwargs
+            terms_text = call_kwargs.get("text") or update.effective_message.reply_text.call_args[0][0]
+            self.assertIn("PAWNS TERMS OF SERVICE &amp; RISK DISCLOSURE", terms_text)
+            self.assertIn("Financial Risk &amp; Leverage Warning", terms_text)
+            self.assertIn("No Personalized Financial Advice", terms_text)
+            terms_kb = call_kwargs.get("reply_markup") or update.effective_message.reply_text.call_args[0][1]
+            terms_btn_cbs = [btn.callback_data for row in terms_kb.inline_keyboard for btn in row if btn.callback_data]
+            self.assertIn("terms:investment", terms_btn_cbs)
+            self.assertIn("menu", terms_btn_cbs)
+
+            # Private investment terms
+            update.effective_message.reply_text.reset_mock()
+            loop.run_until_complete(show_investment_terms(update, self.context))
+            call_kwargs = update.effective_message.reply_text.call_args.kwargs
+            inv_terms_text = call_kwargs.get("text") or update.effective_message.reply_text.call_args[0][0]
+            self.assertIn("PAWNS PRIVATE INVESTMENT TERMS &amp; RISK POLICY", inv_terms_text)
+            self.assertIn("Minimum Allocation &amp; Commitments", inv_terms_text)
+            self.assertIn("Profit Distribution &amp; Return Basis", inv_terms_text)
+        finally:
+            loop.close()
+
+    def test_disabled_third_broker_and_prop(self):
+        """Verify broker 3 and prop 3 are disabled/excluded from live selection."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            update = MagicMock()
+            update.effective_user.id = 999111
+            update.callback_query = None
+            update.effective_message.reply_text = AsyncMock()
+
+            # Forex Live account brokers
+            loop.run_until_complete(show_forex_live(update, self.context))
+            call_kwargs = update.effective_message.reply_text.call_args.kwargs
+            kb_live = call_kwargs.get("reply_markup") or update.effective_message.reply_text.call_args[0][1]
+            live_btn_labels = [btn.text for row in kb_live.inline_keyboard for btn in row]
+            self.assertTrue(any("Exness" in lbl for lbl in live_btn_labels))
+            self.assertTrue(any("HFM" in lbl for lbl in live_btn_labels))
+            self.assertFalse(any("Deriv" in lbl for lbl in live_btn_labels))
+
+            # Forex Prop firm partners
+            update.effective_message.reply_text.reset_mock()
+            loop.run_until_complete(show_forex_prop(update, self.context))
+            call_kwargs = update.effective_message.reply_text.call_args.kwargs
+            kb_prop = call_kwargs.get("reply_markup") or update.effective_message.reply_text.call_args[0][1]
+            prop_btn_labels = [btn.text for row in kb_prop.inline_keyboard for btn in row]
+            self.assertTrue(any("Naira Trader" in lbl for lbl in prop_btn_labels))
+            self.assertTrue(any("Naira Prop" in lbl for lbl in prop_btn_labels))
+            self.assertFalse(any("Global Dollar" in lbl for lbl in prop_btn_labels))
+        finally:
+            loop.close()
+
+    def test_admin_announcement_workflow(self):
+        """Verify the full /announcement admin workflow: preview, confirmation, and broadcast."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            admin_id = 123456789
+            non_admin_id = 888777666
+            self.context.user_data = {}
+
+            # Seed 3 users in database
+            for uid in [1001, 1002, 1003]:
+                loop.run_until_complete(
+                    self.db.users.update_one(
+                        {"telegram_id": uid},
+                        {"$set": {"full_name": f"User {uid}", "telegram_id": uid}},
+                        upsert=True,
+                    )
+                )
+
+            # 1. Non-admin is denied
+            non_admin_update = MagicMock()
+            non_admin_update.effective_user.id = non_admin_id
+            non_admin_update.callback_query = None
+            non_admin_update.effective_message.reply_text = AsyncMock()
+
+            state = loop.run_until_complete(admin_announcement_start(non_admin_update, self.context))
+            self.assertEqual(state, ConversationHandler.END)
+
+            # 2. Admin initiates /announcement
+            admin_update = MagicMock()
+            admin_update.effective_user.id = admin_id
+            admin_update.callback_query = None
+            admin_update.effective_message.reply_text = AsyncMock()
+
+            state = loop.run_until_complete(admin_announcement_start(admin_update, self.context))
+            self.assertEqual(state, ANNOUNCEMENT_TEXT_INPUT)
+            prompt_text = admin_update.effective_message.reply_text.call_args[0][0]
+            self.assertIn("PAWNS BROADCAST ANNOUNCEMENT", prompt_text)
+            self.assertIn("registered bot user(s)", prompt_text)
+
+            # 3. Admin sends empty text
+            empty_msg_update = MagicMock()
+            empty_msg_update.effective_user.id = admin_id
+            empty_msg_update.effective_message.text = "   "
+            empty_msg_update.effective_message.text_html = ""
+            empty_msg_update.effective_message.reply_text = AsyncMock()
+
+            state = loop.run_until_complete(receive_announcement_text(empty_msg_update, self.context))
+            self.assertEqual(state, ANNOUNCEMENT_TEXT_INPUT)
+
+            # 4. Admin sends valid text -> receives preview
+            text_update = MagicMock()
+            text_update.effective_user.id = admin_id
+            text_update.effective_message.text = "Exciting VIP trading strategy update!"
+            text_update.effective_message.text_html = "<b>Exciting VIP</b> trading strategy update!"
+            text_update.effective_message.reply_text = AsyncMock()
+
+            state = loop.run_until_complete(receive_announcement_text(text_update, self.context))
+            self.assertEqual(state, ANNOUNCEMENT_CONFIRM)
+
+            preview_kwargs = text_update.effective_message.reply_text.call_args.kwargs
+            preview_text = text_update.effective_message.reply_text.call_args[0][0]
+            kb = preview_kwargs.get("reply_markup") or text_update.effective_message.reply_text.call_args[0][1]
+
+            self.assertIn("ANNOUNCEMENT PREVIEW", preview_text)
+            self.assertIn("🔊 <b>PAWNS ANNOUNCEMENT</b> 🔊", preview_text)
+            self.assertIn("<b>Exciting VIP</b> trading strategy update!", preview_text)
+            btn_cbs = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+            self.assertIn("announce:proceed", btn_cbs)
+            self.assertIn("announce:cancel", btn_cbs)
+
+            # 5. Cancellation test
+            cancel_update = MagicMock()
+            cancel_update.effective_user.id = admin_id
+            cancel_update.callback_query = MagicMock()
+            cancel_update.callback_query.answer = AsyncMock()
+            cancel_update.callback_query.edit_message_text = AsyncMock()
+
+            cancel_state = loop.run_until_complete(admin_announcement_cancel(cancel_update, self.context))
+            self.assertEqual(cancel_state, ConversationHandler.END)
+            self.assertNotIn("announcement_content", self.context.user_data)
+            cancel_text = cancel_update.callback_query.edit_message_text.call_args[0][0]
+            self.assertIn("Announcement cancelled", cancel_text)
+
+            # 6. Proceed & Broadcast test (2 successful, 1 blocked)
+            self.context.user_data["announcement_content"] = "Live Broadcast Content"
+
+            proceed_update = MagicMock()
+            proceed_update.effective_user.id = admin_id
+            proceed_update.effective_user.username = "head_admin"
+            proceed_update.callback_query = MagicMock()
+            proceed_update.callback_query.answer = AsyncMock()
+            proceed_update.callback_query.edit_message_text = AsyncMock()
+
+            async def mock_send_message(chat_id, **kwargs):
+                if chat_id == 1003:
+                    raise Forbidden("Bot was blocked by the user")
+                return MagicMock()
+
+            self.context.bot.send_message = AsyncMock(side_effect=mock_send_message)
+
+            proceed_state = loop.run_until_complete(admin_announcement_proceed(proceed_update, self.context))
+            self.assertEqual(proceed_state, ConversationHandler.END)
+            self.assertNotIn("announcement_content", self.context.user_data)
+
+            # Verify audit trail
+            audit_entry = loop.run_until_complete(
+                self.db.audit.find_one({"action": "announcement_broadcast"})
+            )
+            self.assertIsNotNone(audit_entry)
+            self.assertEqual(audit_entry["sent_count"], 2)
+            self.assertEqual(audit_entry["failed_count"], 1)
+
+            # Verify completion message
+            final_report = proceed_update.callback_query.edit_message_text.call_args[0][0]
+            self.assertIn("ANNOUNCEMENT BROADCAST COMPLETED", final_report)
+            self.assertIn("Successfully Delivered:</b> 2", final_report)
+            self.assertIn("Failed / Blocked:</b> 1", final_report)
+        finally:
+            loop.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

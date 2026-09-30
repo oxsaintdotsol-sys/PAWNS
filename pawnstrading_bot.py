@@ -29,6 +29,7 @@ Only an authorised administrator can verify or reject it.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import hmac
@@ -50,6 +51,8 @@ from pymongo.errors import ConnectionFailure, PyMongoError, ServerSelectionTimeo
 from pymongo.server_api import ServerApi
 from telegram import (
     BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
     CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -106,6 +109,7 @@ LOGGER = logging.getLogger("PAWNS")
 (INVESTOR_WITHDRAW_INPUT,) = range(20, 21)
 (INVESTOR_TERMINATE_INPUT,) = range(30, 31)
 (ADMIN_REPORT_INPUT,) = range(40, 41)
+(ANNOUNCEMENT_TEXT_INPUT, ANNOUNCEMENT_CONFIRM) = range(50, 52)
 
 
 SERVICE_NAMES = {
@@ -208,6 +212,34 @@ LINK_SETTING_KEYS = {
     "prop_2": "PROP_FIRM_2_URL",
     "prop_3": "PROP_FIRM_3_URL",
 }
+
+USER_COMMANDS = [
+    BotCommand("start", "Start the bot"),
+    BotCommand("menu", "Return to main menu"),
+    BotCommand("investment", "Open private investment"),
+    BotCommand("crypto", "Open crypto futures onboarding"),
+    BotCommand("forex", "Open forex onboarding"),
+    BotCommand("synthetic", "Open synthetic onboarding"),
+    BotCommand("referral", "View referral program"),
+    BotCommand("support", "Contact support (@Moyin_13)"),
+    BotCommand("terms", "View terms and risk disclosure"),
+    BotCommand("myid", "Check your Telegram ID & status"),
+    BotCommand("cancel", "Cancel current registration"),
+]
+
+ADMIN_COMMANDS = [
+    BotCommand("admin", "Admin Control Center"),
+    BotCommand("announcement", "Broadcast announcement to all users"),
+    BotCommand("stats", "Live platform statistics"),
+    BotCommand("admins", "List authorized administrators"),
+    BotCommand("addadmin", "Grant administrator privileges"),
+    BotCommand("removeadmin", "Revoke administrator privileges"),
+    BotCommand("settings", "View dynamic platform configuration"),
+    BotCommand("checkexpiry", "Check subscription expiries"),
+    BotCommand("audit", "Inspect recent audit log"),
+    BotCommand("report", "Export transactions & reports"),
+] + USER_COMMANDS
+
 
 FORBIDDEN_SECRET_RE = re.compile(
     r"\b(seed\s*phrase|private\s*key|wallet\s*key|password|passcode|one[- ]?time\s*(?:password|code)|otp|2fa\s*code)\b",
@@ -614,7 +646,7 @@ class InMemoryCollection:
             return copy.deepcopy(new_doc)
         return None
 
-    def find(self, filter_dict: dict[str, Any] | None = None) -> AsyncCursorWrapper:
+    def find(self, filter_dict: dict[str, Any] | None = None, *args: Any, **kwargs: Any) -> AsyncCursorWrapper:
         f = filter_dict or {}
         matched = [copy.deepcopy(d) for d in self.docs if _matches(d, f)]
         return AsyncCursorWrapper(matched)
@@ -961,8 +993,48 @@ def get_db(context: ContextTypes.DEFAULT_TYPE) -> Database:
     return context.application.bot_data["db"]
 
 
-def is_admin(user_id: int | None, settings: Settings) -> bool:
-    return user_id is not None and user_id in settings.admin_chat_ids
+def is_admin(user_id: int | None, settings: Settings, extra_admins: set[int] | None = None) -> bool:
+    if user_id is None:
+        return False
+    if user_id in settings.admin_chat_ids:
+        return True
+    if extra_admins and user_id in extra_admins:
+        return True
+    return False
+
+
+def get_admin_ids(context: ContextTypes.DEFAULT_TYPE) -> set[int]:
+    settings = get_settings(context)
+    admins = set(settings.admin_chat_ids)
+    cached = context.application.bot_data.get("admin_ids")
+    if cached:
+        admins.update(cached)
+    return admins
+
+
+def is_admin_user(user_id: int | None, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if user_id is None:
+        return False
+    return user_id in get_admin_ids(context)
+
+
+async def require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+    user_id = user.id if user else None
+    if not is_admin_user(user_id, context):
+        if update.callback_query:
+            await update.callback_query.answer("⛔ Access denied: Not an administrator.", show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(
+                "⛔ <b>Access Denied</b>\n\n"
+                f"Your Telegram ID (<code>{user_id or 'Unknown'}</code>) is not recognized as an administrator.\n\n"
+                "To authorize this account, ask an existing administrator to run:\n"
+                f"<code>/addadmin {user_id}</code>\n"
+                "or add this ID to <code>ADMIN_CHAT_IDS</code> in your environment.",
+                parse_mode=ParseMode.HTML,
+            )
+        return False
+    return True
 
 
 def referral_id_for(telegram_id: int, secret: str) -> str:
@@ -970,21 +1042,22 @@ def referral_id_for(telegram_id: int, secret: str) -> str:
     return f"BIT{digest[:10].upper()}"
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def main_menu_keyboard(is_admin_user: bool = False) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("♟️ Private Investment", callback_data="service:private")],
+        [InlineKeyboardButton("📈 Crypto Futures", callback_data="service:crypto")],
+        [InlineKeyboardButton("💱 Forex Trading", callback_data="service:forex")],
+        [InlineKeyboardButton("📊 Synthetic Trading (Coming Soon)", callback_data="service:synthetic")],
+        [InlineKeyboardButton("🤝 Referral Program", callback_data="referral")],
         [
-            [InlineKeyboardButton("♟️ Private Investment", callback_data="service:private")],
-            [InlineKeyboardButton("📈 Crypto Futures", callback_data="service:crypto")],
-            [InlineKeyboardButton("💱 Forex Trading", callback_data="service:forex")],
-            [InlineKeyboardButton("📊 Synthetic Trading (Coming Soon)", callback_data="service:synthetic")],
-            [InlineKeyboardButton("🤝 Referral Program", callback_data="referral")],
-            [
-                InlineKeyboardButton("ℹ️ About", callback_data="about"),
-                InlineKeyboardButton("🛟 Support", callback_data="support"),
-            ],
-            [InlineKeyboardButton("📄 Terms & Risk Disclosure", callback_data="terms")],
-        ]
-    )
+            InlineKeyboardButton("ℹ️ About", callback_data="about"),
+            InlineKeyboardButton("🛟 Support", callback_data="support"),
+        ],
+        [InlineKeyboardButton("📄 Terms & Risk Disclosure", callback_data="terms")],
+    ]
+    if is_admin_user:
+        buttons.append([InlineKeyboardButton("🛠 Admin Control Center", callback_data="admin:menu")])
+    return InlineKeyboardMarkup(buttons)
 
 
 def back_keyboard(target: str = "menu") -> InlineKeyboardMarkup:
@@ -1024,10 +1097,24 @@ async def ensure_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dic
     if not user:
         return None
     settings = get_settings(context)
-    return await get_db(context).upsert_user(
+    db = get_db(context)
+    user_doc = await db.upsert_user(
         user,
         referral_id_for(user.id, settings.referral_secret),
     )
+    is_env_admin = user.id in settings.admin_chat_ids
+    if is_env_admin:
+        if not user_doc.get("is_admin"):
+            await db.users.update_one(
+                {"telegram_id": user.id},
+                {"$set": {"is_admin": True}},
+            )
+            user_doc["is_admin"] = True
+        context.application.bot_data.setdefault("admin_ids", set()).add(user.id)
+    elif user_doc.get("is_admin"):
+        context.application.bot_data.setdefault("admin_ids", set()).add(user.id)
+
+    return user_doc
 
 
 def main_menu_text(notice: str = "") -> str:
@@ -1051,16 +1138,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if payload.startswith("ref_"):
             await get_db(context).attribute_referral(update.effective_user.id, payload[4:])
 
-    await send_or_edit(update, main_menu_text(), main_menu_keyboard())
+    is_adm = is_admin_user(update.effective_user.id if update.effective_user else None, context)
+    await send_or_edit(update, main_menu_text(), main_menu_keyboard(is_admin_user=is_adm))
 
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await ensure_user(update, context)
     context.user_data.pop("registration", None)
+    is_adm = is_admin_user(update.effective_user.id if update.effective_user else None, context)
     await send_or_edit(
         update,
         main_menu_text(),
-        main_menu_keyboard(),
+        main_menu_keyboard(is_admin_user=is_adm),
     )
 
 
@@ -1072,7 +1161,19 @@ def configurable_link_button(label: str, url: str, missing_key: str) -> InlineKe
 
 async def get_link(context: ContextTypes.DEFAULT_TYPE, short_key: str) -> str:
     env_name = LINK_SETTING_KEYS[short_key]
-    return await get_db(context).get_setting(short_key, os.getenv(env_name, "").strip())
+    val = await get_db(context).get_setting(short_key, os.getenv(env_name, "").strip())
+    if short_key == "support":
+        cleaned = val.strip()
+        if not cleaned or "REPLACE_WITH" in cleaned or "placeholder" in cleaned:
+            return "https://t.me/Moyin_13"
+        if cleaned.startswith("@"):
+            return f"https://t.me/{cleaned[1:]}"
+        if not cleaned.startswith("http://") and not cleaned.startswith("https://"):
+            if cleaned.startswith("t.me/"):
+                return f"https://{cleaned}"
+            return f"https://t.me/{cleaned}"
+        return cleaned
+    return val
 
 
 async def show_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1118,13 +1219,12 @@ async def show_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     settings = get_settings(context)
-    terms_url = await get_link(context, "investment_terms")
     start_label = "💰 Invest Now" if settings.private_investment_enabled else "🔒 Registration not yet enabled"
     start_callback = "register:private" if settings.private_investment_enabled else "not_configured:private_investment"
     buttons = [
         [InlineKeyboardButton(start_label, callback_data=start_callback)],
         [InlineKeyboardButton("📊 View Investment Plans", callback_data="service:plans")],
-        [configurable_link_button("📄 Investment Terms", terms_url, "investment_terms")],
+        [InlineKeyboardButton("📄 Investment Terms & Risk Policy", callback_data="terms:investment")],
         [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="menu")],
     ]
     text = (
@@ -1285,12 +1385,10 @@ async def show_forex_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     settings = get_settings(context)
     b1_url = await get_link(context, "broker_1")
     b2_url = await get_link(context, "broker_2")
-    b3_url = await get_link(context, "broker_3")
 
     buttons = [
         [configurable_link_button(f"🔗 {settings.broker_1_name}", b1_url, "broker_1")],
         [configurable_link_button(f"🔗 {settings.broker_2_name}", b2_url, "broker_2")],
-        [configurable_link_button(f"🔗 {settings.broker_3_name}", b3_url, "broker_3")],
         [InlineKeyboardButton("💳 Subscribe / Pay Service Fee", callback_data="forex_live:durations")],
         [InlineKeyboardButton("⬅️ Back", callback_data="service:forex")],
     ]
@@ -1308,12 +1406,10 @@ async def show_forex_prop(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     settings = get_settings(context)
     p1_url = await get_link(context, "prop_1")
     p2_url = await get_link(context, "prop_2")
-    p3_url = await get_link(context, "prop_3")
 
     buttons = [
         [configurable_link_button(f"🔗 {settings.prop_1_name}", p1_url, "prop_1")],
         [configurable_link_button(f"🔗 {settings.prop_2_name}", p2_url, "prop_2")],
-        [configurable_link_button(f"🔗 {settings.prop_3_name}", p3_url, "prop_3")],
         [InlineKeyboardButton("💳 Subscribe / Pay Service Fee", callback_data="forex_prop:durations")],
         [InlineKeyboardButton("⬅️ Back", callback_data="service:forex")],
     ]
@@ -1361,34 +1457,85 @@ async def show_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def show_terms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    terms_url = await get_link(context, "terms")
-    buttons = []
-    if is_http_url(terms_url):
-        buttons.append([InlineKeyboardButton("Open full terms", url=terms_url)])
-    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu")])
-    settings = get_settings(context)
-    await send_or_edit(
-        update,
-        "<b>TERMS & RISK DISCLOSURE</b>\n\n"
-        f"{html.escape(settings.terms_text)}\n\n"
-        "The bot does not provide personalised financial advice and does not automatically confirm payments.",
-        InlineKeyboardMarkup(buttons),
+    text = (
+        "📜 <b>PAWNS TERMS OF SERVICE &amp; RISK DISCLOSURE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Please review the governing terms and disclosures below:</i>\n\n"
+        "<b>1. Scope of Services &amp; Platform Role</b>\n"
+        "PAWNS provides market educational content, trade analysis, and technical onboarding "
+        "for independent third-party brokers and proprietary trading firms. PAWNS does not operate "
+        "as a custodian of user trading funds or a registered broker-dealer.\n\n"
+        "<b>2. Financial Risk &amp; Leverage Warning</b>\n"
+        "Trading foreign exchange (Forex), cryptocurrencies, synthetic contracts, and leveraged products "
+        "carries substantial risk of loss. Leverage magnifies both potential gains and losses. You may "
+        "lose some or all of your deposited capital. Never risk funds you cannot afford to lose.\n\n"
+        "<b>3. No Personalized Financial Advice</b>\n"
+        "All channel broadcasts, signals, and bot guidance represent general market technical commentary "
+        "and do NOT constitute individualized investment, tax, or legal advice. You maintain sole "
+        "responsibility for your trading decisions.\n\n"
+        "<b>4. Third-Party Provider Independence</b>\n"
+        "Partner brokers (e.g. Exness, HFM) and prop firms (e.g. Naira Trader, Naira Prop) operate "
+        "independently. PAWNS assumes no liability for their order execution, platform latency, spread "
+        "fluctuations, challenge rules, or withdrawal processing.\n\n"
+        "<b>5. Service Fees &amp; Non-Refundability</b>\n"
+        "Onboarding and VIP signal fees cover immediate provisioning of intellectual property. "
+        "Once verified and access is granted, all fee payments are final and non-refundable.\n\n"
+        "<b>6. Security Notice</b>\n"
+        "PAWNS staff will <b>NEVER</b> ask for your trading account password, private key, wallet seed phrase, "
+        "or OTP codes. Official payments must strictly follow verified in-bot instructions."
     )
+    buttons = [
+        [InlineKeyboardButton("♟️ View Private Investment Terms", callback_data="terms:investment")],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")],
+    ]
+    await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
+
+async def show_investment_terms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "♟️ <b>PAWNS PRIVATE INVESTMENT TERMS &amp; RISK POLICY</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Review the terms governing private capital allocation:</i>\n\n"
+        "<b>1. Capital Allocation &amp; Portfolio Custody</b>\n"
+        "Funds deposited under the PAWNS Private Investment Program are deployed into actively managed "
+        "algorithmic and discretionary trading strategies aligned with the selected risk profile.\n\n"
+        "<b>2. Minimum Allocation &amp; Commitments</b>\n"
+        "• <b>Minimum Principal:</b> $500 USDT (strictly TRON TRC20 network).\n"
+        "• <b>Duration Cycles:</b> Commitments (e.g., 3, 6, 12 months) are required for strategy execution. "
+        "Early contract termination requires administrative review.\n\n"
+        "<b>3. Profit Distribution &amp; Return Basis</b>\n"
+        "Target percentages reflect net profit distributions based on closed trading P&amp;L. "
+        "Profits may be withdrawn at cycle completion through the in-bot Investor Hub. "
+        "Principal return or rollover is executed upon maturity reconciliation.\n\n"
+        "<b>4. Market Risk &amp; Volatility Disclosure</b>\n"
+        "Despite strict risk parameters (such as drawdown stops and position limits), private portfolio "
+        "allocation remains subject to market volatility. Invested capital is not insured by governmental "
+        "deposit schemes.\n\n"
+        "<b>5. Governance</b>\n"
+        "This policy operates in conjunction with the bilateral investor agreement confirmed upon deposit. "
+        "In any discrepancy, signed records and blockchain confirmations prevail."
+    )
+    buttons = [
+        [InlineKeyboardButton("⬅️ Back to Private Investment", callback_data="service:private")],
+        [InlineKeyboardButton("🏠 Main Menu", callback_data="menu")],
+    ]
+    await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
 
 
 async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     support_url = await get_link(context, "support")
     keyboard = InlineKeyboardMarkup(
         [
-            [configurable_link_button("Contact PAWNS Support", support_url, "support")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="menu")],
+            [InlineKeyboardButton("💬 Contact Support (@Moyin_13)", url=support_url)],
+            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")],
         ]
     )
     text = (
         "🛟 <b>PAWNS SUPPORT</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Have questions about onboarding, verification, or our trading services?\n\n"
-        "Use the button below to reach the PAWNS support team directly."
+        "Reach our official support administrator directly on Telegram: <b>@Moyin_13</b>\n\n"
+        "Click the button below to start a direct message."
     )
     await send_or_edit(update, text, keyboard)
 
@@ -1514,9 +1661,16 @@ async def route_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         "about": show_about,
         "support": show_support,
         "terms": show_terms,
+        "terms:investment": show_investment_terms,
         "referral": show_referral,
         "referral:tiers": show_referral_tiers,
         "inv:report": investor_report_request,
+        "admin:menu": lambda u, c: admin_panel_menu(u, c),
+        "admin:stats": lambda u, c: admin_stats(u, c),
+        "admin:pending": lambda u, c: admin_pending_callback(u, c),
+        "admin:settings_view": lambda u, c: admin_settings_view(u, c),
+        "admin:manage": lambda u, c: admin_manage_callback(u, c),
+        "admin:audit": lambda u, c: admin_audit_callback(u, c),
     }
     handler = routes.get(data)
     if handler:
@@ -2432,7 +2586,7 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     settings = get_settings(context)
     admin_user = update.effective_user
-    if not is_admin(admin_user.id if admin_user else None, settings):
+    if not is_admin_user(admin_user.id if admin_user else None, context):
         await query.answer("You are not authorised to perform this action.", show_alert=True)
         return
 
@@ -2749,9 +2903,475 @@ async def receive_onboarding_input(update: Update, context: ContextTypes.DEFAULT
     return ConversationHandler.END
 
 
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user:
+        return
+    is_adm = is_admin_user(user.id, context)
+    role_str = "👑 <b>Authorized Administrator ✅</b>" if is_adm else "👤 <b>Standard User</b>"
+    text = (
+        "🆔 <b>YOUR TELEGRAM IDENTITY</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Telegram ID:</b> <code>{user.id}</code>\n"
+        f"• <b>Full Name:</b> {html.escape(user.full_name)}\n"
+        f"• <b>Username:</b> @{html.escape(user.username or 'None')}\n"
+        f"• <b>Status:</b> {role_str}\n\n"
+    )
+    if not is_adm:
+        text += (
+            "<i>If you are an administrator, copy your Telegram ID above and add it to "
+            "<code>ADMIN_CHAT_IDS</code> in your environment, or ask an existing administrator to run "
+            f"<code>/addadmin {user.id}</code>.</i>"
+        )
+    else:
+        text += "<i>You have active administrator privileges. Use /admin to access the control panel.</i>"
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def admin_panel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📊 Platform Stats", callback_data="admin:stats"),
+                InlineKeyboardButton("⏳ Pending Reviews", callback_data="admin:pending"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ System Settings", callback_data="admin:settings_view"),
+                InlineKeyboardButton("👥 Manage Admins", callback_data="admin:manage"),
+            ],
+            [
+                InlineKeyboardButton("📢 New Announcement", callback_data="admin:announce"),
+                InlineKeyboardButton("📋 Recent Audit Log", callback_data="admin:audit"),
+            ],
+            [
+                InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="menu"),
+            ],
+        ]
+    )
+    text = (
+        "🛠 <b>PAWNS ADMIN CONTROL CENTER</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Welcome, Administrator! Select an operation below or send an administrative command.\n\n"
+        "<b>Available Admin Commands:</b>\n"
+        "• <code>/announcement</code> — Broadcast announcement to all users\n"
+        "• <code>/stats</code> — View live platform statistics\n"
+        "• <code>/admins</code> — List &amp; view authorized admins\n"
+        "• <code>/addadmin &lt;id&gt;</code> — Grant admin role\n"
+        "• <code>/removeadmin &lt;id&gt;</code> — Revoke admin role\n"
+        "• <code>/setwallet &lt;type&gt; &lt;addr&gt;</code> — Update payment wallet\n"
+        "• <code>/setfee &lt;service&gt; &lt;amt&gt;</code> — Update pricing\n"
+        "• <code>/setnairarate &lt;rate&gt;</code> — Update USD/NGN rate\n"
+        "• <code>/checkexpiry</code> — Check subscription expiries\n"
+        "• <code>/audit</code> — Inspect audit trail\n"
+        "• <code>/report</code> — Generate CSV export report"
+    )
+    if update.callback_query:
+        await send_or_edit(update, text, keyboard)
+    elif update.effective_message:
+        await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+
+async def admin_pending_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+    db = get_db(context)
+    pending_submissions = await db.submissions.find(
+        {"payment_status": {"$in": ["PENDING", "Under Review"]}}
+    ).sort("created_at", -1).to_list(length=10)
+
+    pending_count = await db.submissions.count_documents(
+        {"payment_status": {"$in": ["PENDING", "Under Review"]}}
+    )
+
+    text = (
+        "⏳ <b>PENDING SUBMISSIONS QUEUE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Total Submissions Awaiting Review:</b> {pending_count}\n\n"
+    )
+    if not pending_submissions:
+        text += "🎉 <i>No submissions currently awaiting review. All caught up!</i>"
+    else:
+        for sub in pending_submissions:
+            ref = sub.get("reference", "N/A")
+            svc = sub.get("service_name", sub.get("service", "Trading"))
+            amt = sub.get("amount", "0")
+            cur = sub.get("currency", "USDT")
+            uname = sub.get("telegram_username")
+            u_str = f"@{uname}" if uname else f"ID: {sub.get('telegram_id')}"
+            text += f"• <code>{ref}</code> | {svc} | ${amt} {cur} | {u_str}\n"
+        text += "\n<i>Review submissions via notifications or manual review commands.</i>"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin:menu")]
+    ])
+    await send_or_edit(update, text, keyboard)
+
+
+async def admin_manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
     settings = get_settings(context)
-    if not is_admin(update.effective_user.id if update.effective_user else None, settings):
+    db = get_db(context)
+    env_admins = set(settings.admin_chat_ids)
+
+    db_admins = []
+    async for doc in db.users.find({"is_admin": True}):
+        tid = doc.get("telegram_id")
+        uname = doc.get("telegram_username")
+        fname = doc.get("full_name") or ""
+        db_admins.append((tid, uname, fname))
+
+    text = (
+        "👥 <b>ADMINISTRATOR ROLES &amp; ACCESS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Bootstrap Admins (from ADMIN_CHAT_IDS env):</b>\n"
+    )
+    for tid in env_admins:
+        text += f"• <code>{tid}</code> (Configured in Environment)\n"
+
+    text += "\n<b>Database Admins (MongoDB):</b>\n"
+    extra_count = 0
+    for tid, uname, fname in db_admins:
+        if tid not in env_admins:
+            extra_count += 1
+            uname_str = f"@{uname}" if uname else fname or "No username"
+            text += f"• <code>{tid}</code> — {html.escape(uname_str)}\n"
+    if extra_count == 0:
+        text += "<i>No additional database admins.</i>\n"
+
+    text += (
+        "\n<b>Management Commands:</b>\n"
+        "• <code>/addadmin &lt;telegram_id&gt;</code> — Grant admin privileges\n"
+        "• <code>/removeadmin &lt;telegram_id&gt;</code> — Revoke admin privileges"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin:menu")]
+    ])
+    if update.callback_query:
+        await send_or_edit(update, text, keyboard)
+    elif update.effective_message:
+        await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+
+async def admin_audit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+    db = get_db(context)
+    events = await db.audit.find().sort("created_at", -1).to_list(length=10)
+    text = (
+        "📋 <b>RECENT AUDIT TRAIL (Last 10 Events)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    if not events:
+        text += "<i>No audit events recorded yet.</i>"
+    else:
+        for ev in events:
+            action = ev.get("action", "unknown")
+            admin_id = ev.get("admin_id", "System")
+            dt = ev.get("created_at")
+            dt_str = dt.strftime("%m-%d %H:%M") if isinstance(dt, datetime) else str(dt)[:16]
+            details = ev.get("details", {})
+            ref = details.get("reference", "") if isinstance(details, dict) else ev.get("reference", "")
+            ref_str = f" [<code>{ref}</code>]" if ref else ""
+            text += f"• <code>{dt_str}</code> | <b>{html.escape(action)}</b> by <code>{admin_id}</code>{ref_str}\n"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin:menu")]
+    ])
+    await send_or_edit(update, text, keyboard)
+
+
+async def admin_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Usage: <code>/addadmin &lt;telegram_id&gt;</code>\n"
+            "Example: <code>/addadmin 123456789</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        target_id = int(context.args[0].strip())
+    except ValueError:
+        await update.effective_message.reply_text("❌ Telegram ID must be a numeric integer.")
+        return
+    db = get_db(context)
+    now = utc_now()
+    await db.users.update_one(
+        {"telegram_id": target_id},
+        {"$set": {"is_admin": True, "updated_at": now}},
+        upsert=True,
+    )
+    context.application.bot_data.setdefault("admin_ids", set()).add(target_id)
+    try:
+        set_cmd = getattr(context.bot, "set_my_commands", None)
+        if callable(set_cmd):
+            res = set_cmd(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=target_id))
+            if asyncio.iscoroutine(res):
+                await res
+    except Exception as exc:
+        LOGGER.warning("Could not set admin commands for new admin %s: %s", target_id, exc)
+    await db.audit.insert_one({
+        "action": "admin_added",
+        "target_id": target_id,
+        "admin_id": update.effective_user.id,
+        "created_at": now,
+    })
+    await update.effective_message.reply_text(
+        f"✅ <b>Admin Added Successfully</b>\n\nTelegram ID <code>{target_id}</code> now has administrative privileges.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def admin_remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Usage: <code>/removeadmin &lt;telegram_id&gt;</code>\n"
+            "Example: <code>/removeadmin 123456789</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        target_id = int(context.args[0].strip())
+    except ValueError:
+        await update.effective_message.reply_text("❌ Telegram ID must be a numeric integer.")
+        return
+    settings = get_settings(context)
+    if target_id in settings.admin_chat_ids:
+        await update.effective_message.reply_text(
+            f"⚠️ Cannot revoke Telegram ID <code>{target_id}</code> because it is configured in the environment <code>ADMIN_CHAT_IDS</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    db = get_db(context)
+    now = utc_now()
+    await db.users.update_one(
+        {"telegram_id": target_id},
+        {"$set": {"is_admin": False, "updated_at": now}},
+    )
+    admin_set = context.application.bot_data.get("admin_ids")
+    if admin_set and target_id in admin_set:
+        admin_set.discard(target_id)
+    try:
+        del_cmd = getattr(context.bot, "delete_my_commands", None)
+        if callable(del_cmd):
+            res = del_cmd(scope=BotCommandScopeChat(chat_id=target_id))
+            if asyncio.iscoroutine(res):
+                await res
+    except Exception as exc:
+        LOGGER.warning("Could not delete admin commands for revoked admin %s: %s", target_id, exc)
+    await db.audit.insert_one({
+        "action": "admin_removed",
+        "target_id": target_id,
+        "admin_id": update.effective_user.id,
+        "created_at": now,
+    })
+    await update.effective_message.reply_text(
+        f"✅ <b>Admin Removed</b>\n\nTelegram ID <code>{target_id}</code> no longer has administrative privileges.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def admin_list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+    await admin_manage_callback(update, context)
+
+
+def format_announcement_message(body: str) -> str:
+    return (
+        "🔊 <b>PAWNS ANNOUNCEMENT</b> 🔊\n"
+        "──────────────────────────\n"
+        f"{body}\n"
+        "──────────────────────────"
+    )
+
+
+async def admin_announcement_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await require_admin(update, context):
+        return ConversationHandler.END
+
+    context.user_data.pop("announcement_content", None)
+    db = get_db(context)
+    user_count = await db.users.count_documents({})
+
+    text = (
+        "📢 <b>PAWNS BROADCAST ANNOUNCEMENT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"You are preparing an official broadcast for <b>{user_count}</b> registered bot user(s).\n\n"
+        "✍️ <b>Please send your announcement message text below:</b>\n"
+        "<i>(You will be shown a structured preview before anything is broadcasted)</i>\n\n"
+        "Send /cancel to abort at any time."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Cancel", callback_data="announce:cancel")]
+    ])
+    if update.callback_query:
+        await update.callback_query.answer()
+        await send_or_edit(update, text, keyboard)
+    elif update.effective_message:
+        await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    return ANNOUNCEMENT_TEXT_INPUT
+
+
+async def receive_announcement_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await require_admin(update, context):
+        return ConversationHandler.END
+
+    message = update.effective_message
+    if not message:
+        return ANNOUNCEMENT_TEXT_INPUT
+
+    raw_text = (message.text_html or (html.escape(message.text) if message.text else "")).strip()
+    if not raw_text:
+        await message.reply_text("❌ Announcement text cannot be empty. Please send your message or /cancel:")
+        return ANNOUNCEMENT_TEXT_INPUT
+
+    context.user_data["announcement_content"] = raw_text
+
+    db = get_db(context)
+    user_count = await db.users.count_documents({})
+
+    formatted_msg = format_announcement_message(raw_text)
+
+    preview_text = (
+        "📢 <b>ANNOUNCEMENT PREVIEW</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Below is how your announcement will appear to users:</i>\n\n"
+        f"{formatted_msg}\n\n"
+        f"👥 <b>Target Audience:</b> {user_count} registered user(s)\n\n"
+        "Do you want to proceed and broadcast this announcement now?"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🚀 Proceed & Broadcast", callback_data="announce:proceed"),
+            InlineKeyboardButton("❌ Cancel", callback_data="announce:cancel"),
+        ]
+    ])
+
+    await message.reply_text(
+        preview_text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
+    return ANNOUNCEMENT_CONFIRM
+
+
+async def admin_announcement_proceed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    if not await require_admin(update, context):
+        return ConversationHandler.END
+
+    content = context.user_data.pop("announcement_content", None)
+    if not content:
+        if query:
+            await query.edit_message_text("⚠️ Announcement session expired. Run /announcement to start again.")
+        return ConversationHandler.END
+
+    if query:
+        await query.edit_message_text(
+            "⏳ <b>Broadcasting in progress...</b>\n\n"
+            "Please wait while the announcement is delivered to all registered users.",
+            parse_mode=ParseMode.HTML,
+        )
+
+    db = get_db(context)
+    bot = context.bot
+
+    user_ids: set[int] = set()
+    cursor = db.users.find({}, {"telegram_id": 1})
+    async for doc in cursor:
+        tid = doc.get("telegram_id")
+        if tid and isinstance(tid, int):
+            user_ids.add(tid)
+
+    broadcast_msg = format_announcement_message(content)
+
+    sent_count = 0
+    failed_count = 0
+
+    for tid in user_ids:
+        try:
+            await bot.send_message(
+                chat_id=tid,
+                text=broadcast_msg,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            sent_count += 1
+            await asyncio.sleep(0.04)  # ~25 msg/sec rate-limit safeguard
+        except (Forbidden, BadRequest, TelegramError) as exc:
+            LOGGER.warning("Failed to deliver broadcast to user %s: %s", tid, exc)
+            failed_count += 1
+        except Exception as exc:
+            LOGGER.error("Unexpected error delivering broadcast to %s: %s", tid, exc)
+            failed_count += 1
+
+    now = utc_now()
+    admin_id = update.effective_user.id if update.effective_user else "unknown"
+    await db.audit.insert_one({
+        "action": "announcement_broadcast",
+        "admin_id": admin_id,
+        "content_length": len(content),
+        "total_targets": len(user_ids),
+        "sent_count": sent_count,
+        "failed_count": failed_count,
+        "created_at": now,
+    })
+
+    admin_username = update.effective_user.username if update.effective_user else None
+    sender_str = f"@{admin_username}" if admin_username else f"ID {admin_id}"
+
+    result_text = (
+        "✅ <b>ANNOUNCEMENT BROADCAST COMPLETED</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Successfully Delivered:</b> {sent_count} user(s)\n"
+        f"• <b>Failed / Blocked:</b> {failed_count} user(s)\n"
+        f"• <b>Total Audience:</b> {len(user_ids)} registered\n"
+        f"• <b>Broadcasted By:</b> {sender_str}\n"
+        f"• <b>Timestamp:</b> {now.strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin:menu")]
+    ])
+
+    if query:
+        await query.edit_message_text(result_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    elif update.effective_message:
+        await update.effective_message.reply_text(result_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+    return ConversationHandler.END
+
+
+async def admin_announcement_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query:
+        await query.answer()
+    context.user_data.pop("announcement_content", None)
+    text = "❌ <b>Announcement cancelled.</b> No messages were broadcasted."
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin:menu")]
+    ])
+    if query:
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    elif update.effective_message:
+        await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
         return
     db = get_db(context)
     users = await db.users.count_documents({})
@@ -2759,21 +3379,28 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     pending = await db.submissions.count_documents({"payment_status": {"$in": ["PENDING", "Under Review"]}})
     verified = await db.submissions.count_documents({"payment_status": {"$in": ["VERIFIED ✅", "Verified"]}})
     rejected = await db.submissions.count_documents({"payment_status": {"$in": ["REJECTED", "Rejected"]}})
-    await update.effective_message.reply_text(
-        "<b>PAWNS ADMIN STATS</b>\n\n"
-        f"Registered users: {users}\n"
-        f"Verified paid referrals: {paid_referrals}\n"
-        f"Pending payments: {pending}\n"
-        f"Verified payments: {verified}\n"
-        f"Rejected payments: {rejected}",
-        parse_mode=ParseMode.HTML,
+    text = (
+        "📊 <b>PAWNS ADMIN STATS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Registered Users:</b> {users}\n"
+        f"• <b>Verified Paid Referrals:</b> {paid_referrals}\n"
+        f"• <b>Pending Review Payments:</b> {pending}\n"
+        f"• <b>Verified Payments:</b> {verified}\n"
+        f"• <b>Rejected Payments:</b> {rejected}"
     )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin:menu")]
+    ]) if update.callback_query else None
+    if update.callback_query:
+        await send_or_edit(update, text, keyboard)
+    elif update.effective_message:
+        await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 
-async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    if not is_admin(update.effective_user.id if update.effective_user else None, settings):
+async def admin_settings_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
         return
+    settings = get_settings(context)
     db = get_db(context)
 
     inv_wallet = await db.get_setting("investment_wallet", settings.investment_wallet)
@@ -2809,9 +3436,9 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"• Investment: {inst_inv}\n"
         f"• Trading: {inst_trd}\n\n"
         "<b>Partner Brokers:</b>\n"
-        f"• {html.escape(settings.broker_1_name)} | {html.escape(settings.broker_2_name)} | {html.escape(settings.broker_3_name)}\n\n"
+        f"• {html.escape(settings.broker_1_name)} | {html.escape(settings.broker_2_name)}\n\n"
         "<b>Partner Prop Firms:</b>\n"
-        f"• {html.escape(settings.prop_1_name)} | {html.escape(settings.prop_2_name)} | {html.escape(settings.prop_3_name)}\n\n"
+        f"• {html.escape(settings.prop_1_name)} | {html.escape(settings.prop_2_name)}\n\n"
         "<b>Admin Commands:</b>\n"
         "• <code>/setwallet &lt;investment|trading&gt; &lt;address&gt;</code>\n"
         "• <code>/setfee &lt;crypto|forex_live|forex_prop|synthetic&gt; &lt;amount&gt;</code>\n"
@@ -2819,19 +3446,31 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "• <code>/setnetwork &lt;investment|trading&gt; &lt;network&gt;</code>\n"
         "• <code>/setinstructions &lt;investment|trading&gt; &lt;text&gt;</code>\n"
         "• <code>/setnairarate &lt;rate&gt;</code>\n"
-        "• <code>/addcommission &lt;referrer_id&gt; &lt;amount&gt; &lt;currency&gt; [note]</code>\n"
-        "• <code>/addinvestmentprofit &lt;investor_id&gt; &lt;profit_amount&gt; [note]</code>\n"
+        "• <code>/addadmin &lt;telegram_id&gt;</code>\n"
+        "• <code>/removeadmin &lt;telegram_id&gt;</code>\n"
         "• <code>/checkexpiry</code>\n"
         "• <code>/audit</code>"
     )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="admin:menu")]
+    ]) if update.callback_query else None
+    if update.callback_query:
+        await send_or_edit(update, text, keyboard)
+    elif update.effective_message:
+        await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+
+async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+    await admin_settings_view(update, context)
 
 
 async def admin_set_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    admin_id = update.effective_user.id if update.effective_user else None
-    if not is_admin(admin_id, settings):
+    if not await require_admin(update, context):
         return
+    settings = get_settings(context)
+    admin_id = update.effective_user.id if update.effective_user else 0
 
     if not context.args or len(context.args) != 2:
         await update.effective_message.reply_text(
@@ -2871,10 +3510,9 @@ async def admin_set_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def admin_set_fee(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    admin_id = update.effective_user.id if update.effective_user else None
-    if not is_admin(admin_id, settings):
+    if not await require_admin(update, context):
         return
+    admin_id = update.effective_user.id if update.effective_user else 0
 
     if not context.args or len(context.args) != 2:
         await update.effective_message.reply_text(
@@ -2907,10 +3545,9 @@ async def admin_set_fee(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def admin_set_min_invest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    admin_id = update.effective_user.id if update.effective_user else None
-    if not is_admin(admin_id, settings):
+    if not await require_admin(update, context):
         return
+    admin_id = update.effective_user.id if update.effective_user else 0
 
     if not context.args or len(context.args) != 1:
         await update.effective_message.reply_text("Usage: /setmininvest &lt;amount&gt;", parse_mode=ParseMode.HTML)
@@ -2934,10 +3571,9 @@ async def admin_set_min_invest(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    admin_id = update.effective_user.id if update.effective_user else None
-    if not is_admin(admin_id, settings):
+    if not await require_admin(update, context):
         return
+    admin_id = update.effective_user.id if update.effective_user else 0
 
     if not context.args or len(context.args) < 2:
         await update.effective_message.reply_text(
@@ -2959,10 +3595,9 @@ async def admin_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def admin_set_instructions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    admin_id = update.effective_user.id if update.effective_user else None
-    if not is_admin(admin_id, settings):
+    if not await require_admin(update, context):
         return
+    admin_id = update.effective_user.id if update.effective_user else 0
 
     if not context.args or len(context.args) < 2:
         await update.effective_message.reply_text(
@@ -2984,10 +3619,9 @@ async def admin_set_instructions(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def admin_set_naira_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    admin_id = update.effective_user.id if update.effective_user else None
-    if not is_admin(admin_id, settings):
+    if not await require_admin(update, context):
         return
+    admin_id = update.effective_user.id if update.effective_user else 0
 
     if not context.args or len(context.args) != 1:
         await update.effective_message.reply_text(
@@ -3189,8 +3823,7 @@ async def subscription_expiry_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def admin_check_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    if not is_admin(update.effective_user.id if update.effective_user else None, settings):
+    if not await require_admin(update, context):
         return
     await update.effective_message.reply_text("⏳ Running subscription expiry check...")
     warned, expired = await run_subscription_expiry_check(context.application)
@@ -3286,7 +3919,7 @@ async def admin_bingx_review(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     settings = get_settings(context)
     admin_user = update.effective_user
-    if not is_admin(admin_user.id if admin_user else None, settings):
+    if not is_admin_user(admin_user.id if admin_user else None, context):
         await query.answer("You are not authorised to perform this action.", show_alert=True)
         return
 
@@ -3433,7 +4066,7 @@ async def admin_write_report_start(update: Update, context: ContextTypes.DEFAULT
     query = update.callback_query
     settings = get_settings(context)
     admin_user = update.effective_user
-    if not is_admin(admin_user.id if admin_user else None, settings):
+    if not is_admin_user(admin_user.id if admin_user else None, context):
         await query.answer("You are not authorised.", show_alert=True)
         return ConversationHandler.END
 
@@ -3619,7 +4252,7 @@ async def admin_withdraw_review(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     settings = get_settings(context)
     admin_user = update.effective_user
-    if not is_admin(admin_user.id if admin_user else None, settings):
+    if not is_admin_user(admin_user.id if admin_user else None, context):
         await query.answer("You are not authorised.", show_alert=True)
         return
 
@@ -3773,7 +4406,7 @@ async def admin_confirm_terminate(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     settings = get_settings(context)
     admin_user = update.effective_user
-    if not is_admin(admin_user.id if admin_user else None, settings):
+    if not is_admin_user(admin_user.id if admin_user else None, context):
         await query.answer("You are not authorised.", show_alert=True)
         return
 
@@ -3827,8 +4460,7 @@ async def admin_confirm_terminate(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def admin_audit_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    if not is_admin(update.effective_user.id if update.effective_user else None, settings):
+    if not await require_admin(update, context):
         return
 
     db = get_db(context)
@@ -3852,8 +4484,7 @@ async def admin_audit_log(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def admin_set_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    if not is_admin(update.effective_user.id if update.effective_user else None, settings):
+    if not await require_admin(update, context):
         return
     if not context.args or len(context.args) != 2:
         keys = ", ".join(LINK_SETTING_KEYS)
@@ -3872,9 +4503,9 @@ async def admin_set_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def admin_add_commission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    if not is_admin(update.effective_user.id if update.effective_user else None, settings):
+    if not await require_admin(update, context):
         return
+    settings = get_settings(context)
     if not context.args or len(context.args) < 3:
         await update.effective_message.reply_text(
             "Usage: /addcommission &lt;referrer_telegram_id&gt; &lt;affiliate_commission&gt; &lt;currency&gt; [note]",
@@ -3916,8 +4547,7 @@ async def admin_add_commission(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_add_investment_profit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = get_settings(context)
-    if not is_admin(update.effective_user.id if update.effective_user else None, settings):
+    if not await require_admin(update, context):
         return
     if not context.args or len(context.args) < 2:
         await update.effective_message.reply_text(
@@ -4021,21 +4651,40 @@ async def post_init(application: Application) -> None:
     await db.initialize()
     me = await application.bot.get_me()
     application.bot_data["bot_username"] = me.username
-    await application.bot.set_my_commands(
-        [
-            BotCommand("start", "Start the bot"),
-            BotCommand("menu", "Return to the main menu"),
-            BotCommand("services", "Display all services"),
-            BotCommand("investment", "Open private investment"),
-            BotCommand("crypto", "Open crypto futures onboarding"),
-            BotCommand("forex", "Open forex onboarding"),
-            BotCommand("synthetic", "Open synthetic onboarding"),
-            BotCommand("referral", "View the referral program"),
-            BotCommand("support", "Contact support"),
-            BotCommand("terms", "View terms and risk disclosure"),
-            BotCommand("cancel", "Cancel the current registration"),
-        ]
-    )
+
+    # Sync database admins
+    settings: Settings = application.bot_data["settings"]
+    admins = set(settings.admin_chat_ids)
+    try:
+        cursor = db.users.find({"is_admin": True})
+        async for doc in cursor:
+            if "telegram_id" in doc:
+                try:
+                    admins.add(int(doc["telegram_id"]))
+                except (ValueError, TypeError):
+                    pass
+        application.bot_data["admin_ids"] = admins
+        LOGGER.info("Admin system initialized with %d authorized administrators", len(admins))
+    except Exception as exc:
+        LOGGER.warning("Could not sync db admins in post_init: %s", exc)
+
+    try:
+        # Default scope: all regular users in private chats see ONLY standard user commands
+        await application.bot.set_my_commands(
+            USER_COMMANDS,
+            scope=BotCommandScopeAllPrivateChats(),
+        )
+        # Dedicated scope: each authorized administrator sees the admin management suite
+        for admin_id in admins:
+            try:
+                await application.bot.set_my_commands(
+                    ADMIN_COMMANDS,
+                    scope=BotCommandScopeChat(chat_id=admin_id),
+                )
+            except Exception as exc:
+                LOGGER.warning("Could not set admin commands for %s: %s", admin_id, exc)
+    except Exception as exc:
+        LOGGER.warning("Could not register scoped bot commands: %s", exc)
     if db.is_memory_mode:
         LOGGER.info("Bot @%s connected; running in IN-MEMORY test mode (no MongoDB)", me.username)
     else:
@@ -4058,6 +4707,7 @@ def build_application(settings: Settings) -> Application:
     )
     application.bot_data["settings"] = settings
     application.bot_data["db"] = db
+    application.bot_data["admin_ids"] = set(settings.admin_chat_ids)
 
     registration = ConversationHandler(
         entry_points=[
@@ -4163,6 +4813,29 @@ def build_application(settings: Settings) -> Application:
     )
     application.add_handler(admin_report_conv)
 
+    admin_announcement_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler(["announcement", "broadcast"], admin_announcement_start),
+            CallbackQueryHandler(admin_announcement_start, pattern=r"^admin:announce$"),
+        ],
+        states={
+            ANNOUNCEMENT_TEXT_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_announcement_text),
+                CallbackQueryHandler(admin_announcement_cancel, pattern=r"^announce:cancel$"),
+            ],
+            ANNOUNCEMENT_CONFIRM: [
+                CallbackQueryHandler(admin_announcement_proceed, pattern=r"^announce:proceed$"),
+                CallbackQueryHandler(admin_announcement_cancel, pattern=r"^announce:cancel$"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler(["cancel", "menu", "start", "stop"], admin_announcement_cancel),
+        ],
+        allow_reentry=True,
+        name="admin_announcement",
+    )
+    application.add_handler(admin_announcement_conv)
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler(["menu", "services", "cancel", "stop"], show_main_menu))
     application.add_handler(CommandHandler("investment", show_private))
@@ -4172,10 +4845,15 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("referral", show_referral))
     application.add_handler(CommandHandler("support", show_support))
     application.add_handler(CommandHandler("terms", show_terms))
+    application.add_handler(CommandHandler(["id", "myid", "whoami"], cmd_my_id))
 
     # Admin commands
     application.add_handler(CommandHandler("stats", admin_stats))
-    application.add_handler(CommandHandler(["settings", "admin"], admin_settings))
+    application.add_handler(CommandHandler(["admin", "panel"], admin_panel_menu))
+    application.add_handler(CommandHandler("settings", admin_settings))
+    application.add_handler(CommandHandler("admins", admin_list_admins))
+    application.add_handler(CommandHandler("addadmin", admin_add_admin))
+    application.add_handler(CommandHandler("removeadmin", admin_remove_admin))
     application.add_handler(CommandHandler("setwallet", admin_set_wallet))
     application.add_handler(CommandHandler("setfee", admin_set_fee))
     application.add_handler(CommandHandler("setmininvest", admin_set_min_invest))
@@ -4216,7 +4894,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(
         CallbackQueryHandler(
             route_menu_callback,
-            pattern=r"^(menu|about|support|terms|referral(:tiers)?|service:.+|crypto:.+|forex_(live|prop):durations|inv:report)$",
+            pattern=r"^(menu|about|support|terms(:investment)?|referral(:tiers)?|service:.+|crypto:.+|forex_(live|prop):durations|inv:report|admin:(menu|stats|pending|settings_view|manage|audit))$",
         )
     )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_message))
