@@ -60,9 +60,16 @@ from pawnstrading_bot import (
     admin_announcement_cancel,
     ANNOUNCEMENT_TEXT_INPUT,
     ANNOUNCEMENT_CONFIRM,
+    ADMIN_VERIFY_LINK_INPUT,
     ConversationHandler,
     USER_COMMANDS,
     ADMIN_COMMANDS,
+    normalize_invite_link,
+    complete_payment_verification,
+    admin_review_verify_entry,
+    receive_admin_verify_link,
+    receive_admin_verify_default,
+    receive_admin_verify_cancel,
 )
 from telegram.error import Forbidden
 
@@ -114,6 +121,7 @@ class TestNewFeatures(unittest.TestCase):
             "settings": self.settings,
             "db": self.db,
         }
+        self.context.user_data = {}
         self.context.bot.send_message = AsyncMock()
         self.context.application.bot.send_message = AsyncMock()
 
@@ -128,15 +136,17 @@ class TestNewFeatures(unittest.TestCase):
             self.assertEqual(CRYPTO_BINGX_FEES["6m"], Decimal("200"))
             self.assertEqual(CRYPTO_BINGX_FEES["12m"], Decimal("300"))
 
-            # Standard tiers: 1m=$100, 3m=$149.9, 6m=$400, 12m=$500
-            self.assertEqual(CRYPTO_STANDARD_FEES["1m"], Decimal("100"))
+            # Standard tiers: 1m=$70, 3m=$149.9, 6m=$250, 12m=$300
+            self.assertEqual(CRYPTO_STANDARD_FEES["1m"], Decimal("70"))
             self.assertEqual(CRYPTO_STANDARD_FEES["3m"], Decimal("149.9"))
-            self.assertEqual(CRYPTO_STANDARD_FEES["6m"], Decimal("400"))
-            self.assertEqual(CRYPTO_STANDARD_FEES["12m"], Decimal("500"))
+            self.assertEqual(CRYPTO_STANDARD_FEES["6m"], Decimal("250"))
+            self.assertEqual(CRYPTO_STANDARD_FEES["12m"], Decimal("300"))
 
-            # Forex tiers: 1m=$100, 3m=$200, 6m=$400, 12m=$500
-            self.assertEqual(FOREX_FEES["1m"], Decimal("100"))
-            self.assertEqual(FOREX_FEES["12m"], Decimal("500"))
+            # Forex tiers: 1m=$50, 3m=$70, 6m=$150, 12m=$200
+            self.assertEqual(FOREX_FEES["1m"], Decimal("50"))
+            self.assertEqual(FOREX_FEES["3m"], Decimal("70"))
+            self.assertEqual(FOREX_FEES["6m"], Decimal("150"))
+            self.assertEqual(FOREX_FEES["12m"], Decimal("200"))
 
             # Verify get_service_payment_info returns correct tier
             bingx_1m = loop.run_until_complete(
@@ -152,7 +162,17 @@ class TestNewFeatures(unittest.TestCase):
             std_1m = loop.run_until_complete(
                 get_service_payment_info(self.context, "crypto", duration="1m", track="standard")
             )
-            self.assertEqual(std_1m["amount"], "100")
+            self.assertEqual(std_1m["amount"], "70")
+
+            forex_live_3m = loop.run_until_complete(
+                get_service_payment_info(self.context, "forex_live", duration="3m")
+            )
+            self.assertEqual(forex_live_3m["amount"], "70")
+
+            forex_prop_6m = loop.run_until_complete(
+                get_service_payment_info(self.context, "forex_prop", duration="6m")
+            )
+            self.assertEqual(forex_prop_6m["amount"], "150")
         finally:
             loop.close()
 
@@ -918,6 +938,297 @@ class TestNewFeatures(unittest.TestCase):
             self.assertIn("ANNOUNCEMENT BROADCAST COMPLETED", final_report)
             self.assertIn("Successfully Delivered:</b> 2", final_report)
             self.assertIn("Failed / Blocked:</b> 1", final_report)
+        finally:
+            loop.close()
+
+    def test_normalize_invite_link(self):
+        # Valid full invite links
+        self.assertEqual(
+            normalize_invite_link("https://t.me/+AbCdEf12345"),
+            "https://t.me/+AbCdEf12345",
+        )
+        self.assertEqual(
+            normalize_invite_link("http://t.me/joinchat/AbCdEf12345"),
+            "http://t.me/joinchat/AbCdEf12345",
+        )
+        # Without https:// scheme
+        self.assertEqual(
+            normalize_invite_link("t.me/+AbCdEf12345"),
+            "https://t.me/+AbCdEf12345",
+        )
+        # Starting with plus (+)
+        self.assertEqual(
+            normalize_invite_link("+AbCdEf12345"),
+            "https://t.me/+AbCdEf12345",
+        )
+        # Invalid inputs
+        self.assertIsNone(normalize_invite_link(""))
+        self.assertIsNone(normalize_invite_link("   "))
+        self.assertIsNone(normalize_invite_link("random text here"))
+        self.assertIsNone(normalize_invite_link("notaurl"))
+
+    def test_admin_verify_crypto_payment_dynamic_invite_link(self):
+        loop = asyncio.new_event_loop()
+        try:
+            admin_id = 123456789
+            user_id = 987654321
+            reference = "BM-20260930-11223344"
+
+            # 1. Seed pending crypto futures submission
+            sub_doc = {
+                "reference": reference,
+                "telegram_id": user_id,
+                "telegram_username": "cryptotrader",
+                "service": "crypto",
+                "service_name": "Crypto Futures Trading",
+                "track": "standard",
+                "duration_key": "1m",
+                "amount": "70",
+                "currency": "USDT",
+                "payment_status": "PENDING",
+                "created_at": utc_now(),
+            }
+            loop.run_until_complete(self.db.submissions.insert_one(sub_doc))
+
+            # 2. Admin clicks Verify button -> entry point
+            entry_update = MagicMock()
+            entry_update.effective_user.id = admin_id
+            entry_update.effective_chat.id = admin_id
+            entry_update.callback_query = MagicMock()
+            entry_update.callback_query.data = f"admin:verify:{reference}"
+            entry_update.callback_query.answer = AsyncMock()
+            entry_update.callback_query.message = MagicMock()
+            entry_update.callback_query.message.message_id = 555
+            entry_update.callback_query.message.photo = None
+            entry_update.callback_query.message.document = None
+            entry_update.callback_query.message.edit_text = AsyncMock()
+            entry_update.callback_query.message.edit_caption = AsyncMock()
+
+            prompt_msg = MagicMock()
+            prompt_msg.message_id = 666
+            self.context.bot.send_message = AsyncMock(return_value=prompt_msg)
+            self.context.bot.delete_message = AsyncMock()
+
+            state = loop.run_until_complete(admin_review_verify_entry(entry_update, self.context))
+            self.assertEqual(state, ADMIN_VERIFY_LINK_INPUT)
+            self.assertIn("admin_verify", self.context.user_data)
+            self.assertEqual(self.context.user_data["admin_verify"]["reference"], reference)
+
+            # Check prompt message content
+            prompt_call = self.context.bot.send_message.call_args
+            self.assertIn("Enter VIP Channel Invite Link", prompt_call[1]["text"])
+            self.assertIn(reference, prompt_call[1]["text"])
+
+            # 3. Admin enters invalid link text -> warned, stays in ADMIN_VERIFY_LINK_INPUT
+            invalid_update = MagicMock()
+            invalid_update.effective_user.id = admin_id
+            invalid_update.message = MagicMock()
+            invalid_update.message.text = "invalid text"
+            invalid_update.message.reply_text = AsyncMock()
+
+            invalid_state = loop.run_until_complete(receive_admin_verify_link(invalid_update, self.context))
+            self.assertEqual(invalid_state, ADMIN_VERIFY_LINK_INPUT)
+            self.assertIn("not appear to be a valid Telegram channel invite link", invalid_update.message.reply_text.call_args[0][0])
+
+            # 4. Admin enters custom one-time link: https://t.me/+CryptoVIP_OneTime_123
+            custom_link = "https://t.me/+CryptoVIP_OneTime_123"
+            link_update = MagicMock()
+            link_update.effective_user.id = admin_id
+            link_update.effective_user.full_name = "Admin Alice"
+            link_update.effective_chat.id = admin_id
+            link_update.message = MagicMock()
+            link_update.message.text = custom_link
+            link_update.message.reply_text = AsyncMock()
+
+            final_state = loop.run_until_complete(receive_admin_verify_link(link_update, self.context))
+            self.assertEqual(final_state, ConversationHandler.END)
+            self.assertNotIn("admin_verify", self.context.user_data)
+
+            # Verify prompt message was deleted
+            self.context.bot.delete_message.assert_called_with(chat_id=admin_id, message_id=666)
+
+            # Verify admin received confirmation of link sent
+            admin_confirm_text = link_update.message.reply_text.call_args[0][0]
+            self.assertIn("Payment Verified & Invite Link Sent!", admin_confirm_text)
+            self.assertIn(custom_link, admin_confirm_text)
+
+            # Verify user received message with unique invite link in button
+            user_send_calls = [
+                call for call in self.context.bot.send_message.call_args_list
+                if call[1].get("chat_id") == user_id
+            ]
+            self.assertEqual(len(user_send_calls), 1)
+            user_call = user_send_calls[0]
+            self.assertIn("Payment Status: VERIFIED ✅", user_call[1]["text"])
+            self.assertIn("Join the VIP Channel", user_call[1]["text"])
+
+            reply_markup = user_call[1]["reply_markup"]
+            vip_button = reply_markup.inline_keyboard[0][0]
+            self.assertEqual(vip_button.text, "🚀 Join VIP Trading Channel")
+            self.assertEqual(vip_button.url, custom_link)
+
+            # Verify DB updates
+            updated_sub = loop.run_until_complete(self.db.submissions.find_one({"reference": reference}))
+            self.assertEqual(updated_sub["payment_status"], "VERIFIED ✅")
+            self.assertEqual(updated_sub["invite_link"], custom_link)
+
+            subscription = loop.run_until_complete(self.db.subscriptions.find_one({"reference": reference}))
+            self.assertIsNotNone(subscription)
+            self.assertEqual(subscription["status"], "active")
+            self.assertEqual(subscription["invite_link"], custom_link)
+        finally:
+            loop.close()
+
+    def test_admin_verify_default_channel_fallback(self):
+        loop = asyncio.new_event_loop()
+        try:
+            admin_id = 123456789
+            user_id = 888777666
+            reference = "BM-20260930-55667788"
+
+            sub_doc = {
+                "reference": reference,
+                "telegram_id": user_id,
+                "service": "forex_live",
+                "service_name": "Forex Live Account Trading",
+                "track": "standard",
+                "duration_key": "1m",
+                "amount": "50",
+                "currency": "USDT",
+                "payment_status": "PENDING",
+                "created_at": utc_now(),
+            }
+            loop.run_until_complete(self.db.submissions.insert_one(sub_doc))
+
+            # Set default channel in settings
+            loop.run_until_complete(self.db.set_setting("pawns_channel", "https://t.me/pawns_default_channel", admin_id))
+
+            entry_update = MagicMock()
+            entry_update.effective_user.id = admin_id
+            entry_update.effective_chat.id = admin_id
+            entry_update.callback_query = MagicMock()
+            entry_update.callback_query.data = f"admin:verify:{reference}"
+            entry_update.callback_query.answer = AsyncMock()
+            entry_update.callback_query.message = MagicMock()
+            entry_update.callback_query.message.photo = None
+            entry_update.callback_query.message.document = None
+            entry_update.callback_query.message.edit_text = AsyncMock()
+            entry_update.callback_query.message.edit_caption = AsyncMock()
+
+            prompt_msg = MagicMock()
+            prompt_msg.message_id = 777
+            self.context.bot.send_message = AsyncMock(return_value=prompt_msg)
+
+            state = loop.run_until_complete(admin_review_verify_entry(entry_update, self.context))
+            self.assertEqual(state, ADMIN_VERIFY_LINK_INPUT)
+
+            # Admin clicks Use Default Configured Channel Link
+            default_query_update = MagicMock()
+            default_query_update.effective_user.id = admin_id
+            default_query_update.callback_query = MagicMock()
+            default_query_update.callback_query.data = f"admin:verify_default:{reference}"
+            default_query_update.callback_query.answer = AsyncMock()
+            default_query_update.callback_query.edit_message_text = AsyncMock()
+
+            def_state = loop.run_until_complete(receive_admin_verify_default(default_query_update, self.context))
+            self.assertEqual(def_state, ConversationHandler.END)
+            self.assertNotIn("admin_verify", self.context.user_data)
+
+            # Verify user received message with default channel url
+            user_send_calls = [
+                call for call in self.context.bot.send_message.call_args_list
+                if call[1].get("chat_id") == user_id
+            ]
+            self.assertEqual(len(user_send_calls), 1)
+            vip_button = user_send_calls[0][1]["reply_markup"].inline_keyboard[0][0]
+            self.assertEqual(vip_button.url, "https://t.me/pawns_default_channel")
+        finally:
+            loop.close()
+
+    def test_admin_verify_private_investment_direct(self):
+        loop = asyncio.new_event_loop()
+        try:
+            admin_id = 123456789
+            user_id = 333444555
+            reference = "BM-20260930-99887766"
+
+            sub_doc = {
+                "reference": reference,
+                "telegram_id": user_id,
+                "service": "private",
+                "service_name": "PAWNS Private Investment",
+                "amount": "1000",
+                "currency": "USDT",
+                "payment_status": "PENDING",
+                "created_at": utc_now(),
+            }
+            loop.run_until_complete(self.db.submissions.insert_one(sub_doc))
+
+            entry_update = MagicMock()
+            entry_update.effective_user.id = admin_id
+            entry_update.effective_chat.id = admin_id
+            entry_update.callback_query = MagicMock()
+            entry_update.callback_query.data = f"admin:verify:{reference}"
+            entry_update.callback_query.answer = AsyncMock()
+            entry_update.callback_query.message = MagicMock()
+            entry_update.callback_query.message.photo = None
+            entry_update.callback_query.message.document = None
+            entry_update.callback_query.message.edit_text = AsyncMock()
+            entry_update.callback_query.message.edit_caption = AsyncMock()
+
+            self.context.bot.send_message = AsyncMock()
+
+            # Private investment verification should complete immediately without entering invite link
+            state = loop.run_until_complete(admin_review_verify_entry(entry_update, self.context))
+            self.assertEqual(state, ConversationHandler.END)
+            self.assertNotIn("admin_verify", self.context.user_data)
+
+            # User gets onboarding button
+            user_send_calls = [
+                call for call in self.context.bot.send_message.call_args_list
+                if call[1].get("chat_id") == user_id
+            ]
+            self.assertEqual(len(user_send_calls), 1)
+            onboard_button = user_send_calls[0][1]["reply_markup"].inline_keyboard[0][0]
+            self.assertEqual(onboard_button.text, "📝 Complete Onboarding")
+            self.assertEqual(onboard_button.callback_data, f"onboard_start:{reference}")
+
+            # DB updated
+            updated_sub = loop.run_until_complete(self.db.submissions.find_one({"reference": reference}))
+            self.assertEqual(updated_sub["payment_status"], "VERIFIED ✅")
+        finally:
+            loop.close()
+
+    def test_admin_verify_cancel(self):
+        loop = asyncio.new_event_loop()
+        try:
+            admin_id = 123456789
+            reference = "BM-20260930-11112222"
+
+            sub_doc = {
+                "reference": reference,
+                "telegram_id": 111,
+                "service": "crypto",
+                "service_name": "Crypto Futures Trading",
+                "payment_status": "PENDING",
+                "created_at": utc_now(),
+            }
+            loop.run_until_complete(self.db.submissions.insert_one(sub_doc))
+
+            self.context.user_data["admin_verify"] = {"reference": reference}
+
+            cancel_update = MagicMock()
+            cancel_update.callback_query = MagicMock()
+            cancel_update.callback_query.answer = AsyncMock()
+            cancel_update.callback_query.edit_message_text = AsyncMock()
+
+            state = loop.run_until_complete(receive_admin_verify_cancel(cancel_update, self.context))
+            self.assertEqual(state, ConversationHandler.END)
+            self.assertNotIn("admin_verify", self.context.user_data)
+
+            # DB submission remains PENDING
+            sub = loop.run_until_complete(self.db.submissions.find_one({"reference": reference}))
+            self.assertEqual(sub["payment_status"], "PENDING")
         finally:
             loop.close()
 

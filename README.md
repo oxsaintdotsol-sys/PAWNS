@@ -44,11 +44,11 @@ The system is built on Python 3.11+ using `python-telegram-bot` (v22.8) and PyMo
 ### 📈 Trading Onboarding
 - **Crypto Futures**:
   - **BingX Partner Track**: Register using the official PAWNS BingX partner link, submit your BingX UID, and gain complimentary VIP trading access upon admin verification.
-  - **Other Exchanges Track**: Choose between 1-Month ($100) or 3-Month ($149.9) subscription plans.
+  - **Other Exchanges Track**: Choose between 1-Month ($70), 3-Month ($149.9), 6-Month ($250), or 1-Year ($300) subscription plans.
 - **Forex (Live Brokers & Prop Firms)**:
   - **Live Brokers**: View recommended partner brokers (Exness and HFM) with direct registration links.
   - **Prop Firms**: Explore partnered prop firms (Naira Trader and Naira Prop) with custom affiliate links.
-  - **Flexible Payment Methods**: Pay via Crypto (USDT on BSC/Tron) or Nigerian Naira (Bank Transfer) at live-configured exchange rates.
+  - **Service Pricing**: 1 Month ($50), 3 Months ($70), 6 Months ($150), 1 Year ($200). Flexible payment via Crypto (USDT on BSC/Tron) or Nigerian Naira (Bank Transfer) at live-configured exchange rates.
 - **Synthetic Indices**:
   - Step-by-step onboarding for Deriv synthetic trading signals.
 
@@ -96,10 +96,14 @@ The system detects administrators through a hybrid architecture combining static
   - Selected service, plan duration, amount, and payment method.
   - Uploaded receipts or transaction hashes with clickable blockchain explorer URLs.
   - On-chain audit details (detected recipient wallet, detected amount, confirmation status).
-- **1-Click Review Buttons**:
-  - `Verify ✅`: Atomically marks submission as verified, activates user subscription, calculates and attributes referral commission to referrer, and sends congratulatory onboarding message with VIP channel link to the user.
-  - `Reject ❌`: Rejects the payment and prompts the admin for an optional rejection reason sent to the user.
-  - `Request Info ℹ️`: Asks the user for additional verification evidence.
+- **Smart Verification & Dynamic Single-Use VIP Invite Links**:
+  - `Verify ✅`:
+    - **Trading Services (Crypto Futures, Forex Live & Prop, Synthetic)**: To prevent unauthorized link reuse and ensure strictly one-time access per paid subscriber, clicking `Verify ✅` initiates a prompt asking the admin to input the customer's unique, single-use VIP channel invite link (e.g. `https://t.me/+AbCdEf12345`).
+    - The admin can reply with the one-time link, choose `[⚡ Use Default Configured Channel Link]` as a fallback, or `[❌ Cancel Verification]` to keep the submission pending.
+    - Upon receiving the link, the system atomically verifies the payment, stores the single-use invite link in both `db.submissions` and `db.subscriptions`, credits any referral commission, and immediately delivers a confirmation message to the subscriber with their unique link embedded in the **`[🚀 Join VIP Trading Channel]`** button.
+    - **Private Investment**: Verification proceeds immediately without an invite link prompt, automatically sending the investor their **`[📝 Complete Onboarding]`** portal activation button.
+  - `Reject ❌`: Atomically rejects the payment and notifies the customer with a direct support route.
+  - `Request Info ℹ️`: Asks the customer for additional verification evidence or corrected transaction hash.
 - **BingX UID & Investor Reviews**:
   - 1-click approval or rejection of submitted BingX UIDs.
   - Review and approve/reject investor withdrawal and termination requests.

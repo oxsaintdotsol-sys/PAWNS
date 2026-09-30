@@ -110,6 +110,7 @@ LOGGER = logging.getLogger("PAWNS")
 (INVESTOR_TERMINATE_INPUT,) = range(30, 31)
 (ADMIN_REPORT_INPUT,) = range(40, 41)
 (ANNOUNCEMENT_TEXT_INPUT, ANNOUNCEMENT_CONFIRM) = range(50, 52)
+(ADMIN_VERIFY_LINK_INPUT,) = range(60, 61)
 
 
 SERVICE_NAMES = {
@@ -129,17 +130,17 @@ CRYPTO_BINGX_FEES = {
 }
 
 CRYPTO_STANDARD_FEES = {
-    "1m": Decimal("100"),
+    "1m": Decimal("70"),
     "3m": Decimal("149.9"),
-    "6m": Decimal("400"),
-    "12m": Decimal("500"),
+    "6m": Decimal("250"),
+    "12m": Decimal("300"),
 }
 
 FOREX_FEES = {
-    "1m": Decimal("100"),
-    "3m": Decimal("200"),
-    "6m": Decimal("400"),
-    "12m": Decimal("500"),
+    "1m": Decimal("50"),
+    "3m": Decimal("70"),
+    "6m": Decimal("150"),
+    "12m": Decimal("200"),
 }
 
 DURATION_DAYS = {
@@ -151,9 +152,9 @@ DURATION_DAYS = {
 }
 
 SERVICE_FEES = {
-    "crypto": "$40 - $500 depending on exchange & duration",
-    "forex_live": "$100 - $500 depending on duration",
-    "forex_prop": "$100 - $500 depending on duration (separate from challenge fees)",
+    "crypto": "$40 - $300 (BingX) / $70 - $300 (Other Exchanges)",
+    "forex_live": "$50 - $200 depending on duration",
+    "forex_prop": "$50 - $200 depending on duration (separate from challenge fees)",
     "synthetic": "Coming soon",
 }
 
@@ -278,6 +279,27 @@ def is_http_url(value: str | None) -> bool:
         return False
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def normalize_invite_link(raw: str) -> str | None:
+    link = raw.strip()
+    if not link:
+        return None
+    if not (link.startswith("http://") or link.startswith("https://")):
+        if link.startswith("t.me/"):
+            link = "https://" + link
+        elif link.startswith("+"):
+            link = "https://t.me/" + link
+        elif "t.me/" in link:
+            link = "https://" + link[link.find("t.me/"):]
+        else:
+            link = "https://" + link
+    if not is_http_url(link):
+        return None
+    parsed = urlparse(link)
+    if "." not in parsed.netloc:
+        return None
+    return link
 
 
 def clip(value: str, length: int = 500) -> str:
@@ -878,9 +900,9 @@ async def get_service_payment_info(
                 if track == "bingx":
                     amount = str(CRYPTO_BINGX_FEES.get(dur_key, Decimal("40")))
                 else:
-                    amount = str(CRYPTO_STANDARD_FEES.get(dur_key, Decimal("100")))
+                    amount = str(CRYPTO_STANDARD_FEES.get(dur_key, Decimal("70")))
             elif service in ("forex_live", "forex_prop"):
-                amount = str(FOREX_FEES.get(dur_key, Decimal("100")))
+                amount = str(FOREX_FEES.get(dur_key, Decimal("50")))
             elif service == "synthetic":
                 amount = await db.get_setting("fee_synthetic", str(settings.fee_synthetic))
             else:
@@ -1287,10 +1309,10 @@ async def show_crypto_fees(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "• 6 Months: <b>$200</b>\n"
         "• 1 Year: <b>$300</b>\n\n"
         "🌐 <b>Other Exchanges (Standard Rates):</b>\n"
-        "• 1 Month: <b>$100</b>\n"
+        "• 1 Month: <b>$70</b>\n"
         "• 3 Months: <b>$149.9</b>\n"
-        "• 6 Months: <b>$400</b>\n"
-        "• 1 Year: <b>$500</b>\n\n"
+        "• 6 Months: <b>$250</b>\n"
+        "• 1 Year: <b>$300</b>\n\n"
         "<i>BingX users receive reduced fees by registering with our official link.</i>"
     )
     buttons = [
@@ -1354,10 +1376,10 @@ async def show_crypto_standard(update: Update, context: ContextTypes.DEFAULT_TYP
         "Choose your subscription duration below to proceed to payment:"
     )
     buttons = [
-        [InlineKeyboardButton("1 Month — $100", callback_data="cf_pay:standard:1m")],
+        [InlineKeyboardButton("1 Month — $70", callback_data="cf_pay:standard:1m")],
         [InlineKeyboardButton("3 Months — $149.9", callback_data="cf_pay:standard:3m")],
-        [InlineKeyboardButton("6 Months — $400", callback_data="cf_pay:standard:6m")],
-        [InlineKeyboardButton("1 Year — $500", callback_data="cf_pay:standard:12m")],
+        [InlineKeyboardButton("6 Months — $250", callback_data="cf_pay:standard:6m")],
+        [InlineKeyboardButton("1 Year — $300", callback_data="cf_pay:standard:12m")],
         [InlineKeyboardButton("⬅️ Back", callback_data="service:crypto")],
     ]
     await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
@@ -1432,10 +1454,10 @@ async def show_forex_durations(update: Update, context: ContextTypes.DEFAULT_TYP
         "Choose your subscription period to proceed to payment:"
     )
     buttons = [
-        [InlineKeyboardButton("1 Month — $100", callback_data=f"forex_pay:{forex_type}:1m")],
-        [InlineKeyboardButton("3 Months — $200", callback_data=f"forex_pay:{forex_type}:3m")],
-        [InlineKeyboardButton("6 Months — $400", callback_data=f"forex_pay:{forex_type}:6m")],
-        [InlineKeyboardButton("1 Year — $500", callback_data=f"forex_pay:{forex_type}:12m")],
+        [InlineKeyboardButton("1 Month — $50", callback_data=f"forex_pay:{forex_type}:1m")],
+        [InlineKeyboardButton("3 Months — $70", callback_data=f"forex_pay:{forex_type}:3m")],
+        [InlineKeyboardButton("6 Months — $150", callback_data=f"forex_pay:{forex_type}:6m")],
+        [InlineKeyboardButton("1 Year — $200", callback_data=f"forex_pay:{forex_type}:12m")],
         [InlineKeyboardButton("⬅️ Back", callback_data=back_target)],
     ]
     await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
@@ -2375,10 +2397,8 @@ def admin_submission_text(submission: dict[str, Any]) -> str:
     )
 
 
-async def notify_admins(context: ContextTypes.DEFAULT_TYPE, submission: dict[str, Any]) -> None:
-    settings = get_settings(context)
-    reference = submission["reference"]
-    keyboard = InlineKeyboardMarkup(
+def make_admin_submission_keyboard(reference: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton("✅ Approve", callback_data=f"admin:verify:{reference}"),
@@ -2389,6 +2409,37 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, submission: dict[str
             ],
         ]
     )
+
+
+async def edit_admin_review_message(
+    message: Any,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    if not message:
+        return
+    try:
+        if getattr(message, "photo", None) or getattr(message, "document", None):
+            await message.edit_caption(
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await message.edit_text(
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+    except Exception as exc:
+        LOGGER.warning("Could not edit admin review message: %s", exc)
+
+
+async def notify_admins(context: ContextTypes.DEFAULT_TYPE, submission: dict[str, Any]) -> None:
+    settings = get_settings(context)
+    reference = submission["reference"]
+    keyboard = make_admin_submission_keyboard(reference)
     for admin_id in settings.admin_chat_ids:
         try:
             await context.bot.send_message(
@@ -2405,17 +2456,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, submission: dict[str
 async def notify_admins_naira(context: ContextTypes.DEFAULT_TYPE, submission: dict[str, Any]) -> None:
     settings = get_settings(context)
     reference = submission["reference"]
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data=f"admin:verify:{reference}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"admin:reject:{reference}"),
-            ],
-            [
-                InlineKeyboardButton("ℹ️ Request Info", callback_data=f"admin:reqinfo:{reference}"),
-            ],
-        ]
-    )
+    keyboard = make_admin_submission_keyboard(reference)
     caption = (
         "🆕 <b>PAWNS NAIRA PAYMENT VERIFICATION REQUIRED</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2582,6 +2623,360 @@ async def process_referral_on_payment_verified(
     return None
 
 
+async def complete_payment_verification(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    submission: dict[str, Any],
+    invite_link: str | None = None,
+    orig_message: Any = None,
+) -> bool:
+    reference = submission["reference"]
+    admin_user = update.effective_user
+    db = get_db(context)
+    now = utc_now()
+
+    update_fields: dict[str, Any] = {
+        "payment_status": "VERIFIED ✅",
+        "onboarding_status": "Pending Details",
+        "admin_verification_status": {
+            "decision": "Approved",
+            "reviewed_by": admin_user.id if admin_user else None,
+            "reviewed_at": now,
+        },
+        "updated_at": now,
+    }
+    if invite_link:
+        update_fields["invite_link"] = invite_link
+
+    updated_sub = await db.submissions.find_one_and_update(
+        {"reference": reference, "payment_status": "PENDING"},
+        {"$set": update_fields},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated_sub:
+        return False
+
+    audit_entry: dict[str, Any] = {
+        "action": "payment_verify",
+        "reference": reference,
+        "admin_id": admin_user.id if admin_user else None,
+        "created_at": now,
+    }
+    if invite_link:
+        audit_entry["invite_link"] = invite_link
+    await db.audit.insert_one(audit_entry)
+
+    # Edit review card in admin chat to reflect approval and remove action buttons
+    rev_text = (
+        admin_submission_text(updated_sub)
+        + f"\n\n<b>Decision:</b> VERIFIED ✅\n"
+        f"<b>Reviewed by:</b> {html.escape(admin_user.full_name if admin_user else 'Admin')}"
+    )
+    if invite_link:
+        rev_text += f"\n<b>VIP Invite Link:</b> <code>{html.escape(invite_link)}</code>"
+
+    target_msg = orig_message
+    if not target_msg and update.callback_query and update.callback_query.message:
+        target_msg = update.callback_query.message
+    if target_msg:
+        await edit_admin_review_message(target_msg, rev_text, reply_markup=None)
+
+    service = updated_sub["service"]
+    service_name = updated_sub.get("service_name", SERVICE_NAMES.get(service, service))
+
+    if service == "private":
+        user_message = (
+            f"🎉 <b>Payment Status: VERIFIED ✅</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your investment payment of <b>${html.escape(str(updated_sub.get('amount', '')))} "
+            f"{html.escape(updated_sub.get('currency', ''))}</b> for <b>{html.escape(service_name)}</b> "
+            f"(Ref: <code>{reference}</code>) has been confirmed!\n\n"
+            "👉 <b>Next Step — Complete Investor Onboarding:</b>\n"
+            "Please tap below to confirm your investor details and receive your portal access."
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("📝 Complete Onboarding", callback_data=f"onboard_start:{reference}")],
+                [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")],
+            ]
+        )
+    else:
+        duration_key = updated_sub.get("duration_key", "1m")
+        days = DURATION_DAYS.get(duration_key, 30)
+        expires_at = now + timedelta(days=days)
+
+        sub_doc = {
+            "telegram_id": updated_sub["telegram_id"],
+            "telegram_username": updated_sub.get("telegram_username"),
+            "reference": reference,
+            "service": service,
+            "service_name": service_name,
+            "track": updated_sub.get("track", "standard"),
+            "duration_key": duration_key,
+            "duration_days": days,
+            "start_date": now,
+            "expires_at": expires_at,
+            "status": "active",
+            "expiry_warning_sent": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if invite_link:
+            sub_doc["invite_link"] = invite_link
+
+        await db.subscriptions.insert_one(sub_doc)
+        await db.users.update_one(
+            {"telegram_id": updated_sub["telegram_id"]},
+            {
+                "$set": {
+                    f"subscriptions.{service}": {
+                        "status": "active",
+                        "expires_at": expires_at,
+                        "reference": reference,
+                        "duration_key": duration_key,
+                        "invite_link": invite_link,
+                    },
+                    "updated_at": now,
+                }
+            },
+        )
+
+        target_channel_url = invite_link or await get_link(context, "pawns_channel")
+        channel_buttons = []
+        if is_http_url(target_channel_url):
+            channel_buttons.append([InlineKeyboardButton("🚀 Join VIP Trading Channel", url=target_channel_url)])
+        channel_buttons.append([InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")])
+
+        dur_label = DURATION_LABELS.get(duration_key, duration_key)
+        user_message = (
+            f"🎉 <b>Payment Status: VERIFIED ✅</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your payment of <b>${html.escape(str(updated_sub.get('amount', '')))} "
+            f"{html.escape(updated_sub.get('currency', ''))}</b> for <b>{html.escape(service_name)}</b> "
+            f"(Ref: <code>{reference}</code>) has been confirmed!\n\n"
+            f"<b>Subscription Period:</b> {html.escape(dur_label)} ({days} days)\n"
+            f"<b>Expires On:</b> {expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            "👉 <b>Join the VIP Channel:</b>\n"
+            "Use the button below to join the private VIP channel and receive signals.\n"
+            "⚠️ <i>Note: This invite link is single-use and assigned exclusively to your account. Do not share or forward it.</i>"
+        )
+        keyboard = InlineKeyboardMarkup(channel_buttons)
+
+    await process_referral_on_payment_verified(context, updated_sub)
+
+    try:
+        await context.bot.send_message(
+            chat_id=updated_sub["telegram_id"],
+            text=user_message,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+    except TelegramError as exc:
+        LOGGER.warning("Could not notify user %s of payment review result: %s", updated_sub["telegram_id"], exc)
+
+    return True
+
+
+async def admin_review_verify_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    admin_user = update.effective_user
+    if not is_admin_user(admin_user.id if admin_user else None, context):
+        await query.answer("You are not authorised to perform this action.", show_alert=True)
+        return ConversationHandler.END
+
+    _, _, reference = query.data.split(":", 2)
+    db = get_db(context)
+    submission = await db.submissions.find_one({"reference": reference})
+    if not submission:
+        await query.answer("Submission not found.", show_alert=True)
+        return ConversationHandler.END
+
+    if submission.get("payment_status") != "PENDING":
+        await query.answer(f"No change made. Current status: {submission.get('payment_status')}", show_alert=True)
+        return ConversationHandler.END
+
+    service = submission.get("service")
+    if service == "private":
+        await query.answer("Verifying private investment payment...")
+        success = await complete_payment_verification(
+            update=update,
+            context=context,
+            submission=submission,
+            invite_link=None,
+            orig_message=query.message,
+        )
+        if not success:
+            await query.answer("Submission was already processed or is no longer pending.", show_alert=True)
+        return ConversationHandler.END
+
+    # For trading services (crypto, forex, synthetic), prompt admin for customer's one-time invite link
+    await query.answer()
+    service_name = submission.get("service_name", SERVICE_NAMES.get(service, service))
+    username = submission.get("telegram_username")
+    user_display = f"@{username}" if username else f"ID: {submission.get('telegram_id')}"
+    duration_key = submission.get("duration_key", "1m")
+    dur_label = DURATION_LABELS.get(duration_key, duration_key)
+    amount = submission.get("amount", "")
+    currency = submission.get("currency", "")
+
+    prompt_text = (
+        "🔗 <b>Enter VIP Channel Invite Link</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Reference:</b> <code>{reference}</code>\n"
+        f"• <b>Subscriber:</b> {html.escape(user_display)}\n"
+        f"• <b>Service:</b> {html.escape(service_name)} ({html.escape(dur_label)})\n"
+        f"• <b>Amount Paid:</b> ${html.escape(str(amount))} {html.escape(currency)}\n\n"
+        "Please reply with the <b>one-time private invite link</b> for this customer "
+        "(e.g. <code>https://t.me/+AbCdEf12345</code>).\n\n"
+        "Once entered, payment is verified and the user will receive the <b>[🚀 Join VIP Trading Channel]</b> button with this link."
+    )
+    prompt_markup = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⚡ Use Default Configured Channel Link", callback_data=f"admin:verify_default:{reference}")],
+            [InlineKeyboardButton("❌ Cancel Verification", callback_data=f"admin:verify_cancel:{reference}")],
+        ]
+    )
+    prompt_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=prompt_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=prompt_markup,
+    )
+    context.user_data["admin_verify"] = {
+        "reference": reference,
+        "orig_message": query.message,
+        "prompt_msg_id": prompt_msg.message_id,
+    }
+    return ADMIN_VERIFY_LINK_INPUT
+
+
+async def receive_admin_verify_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    verify_data = context.user_data.get("admin_verify")
+    if not verify_data:
+        return ConversationHandler.END
+
+    raw_text = update.message.text.strip()
+    norm_link = normalize_invite_link(raw_text)
+    reference = verify_data.get("reference")
+
+    if not norm_link:
+        await update.message.reply_text(
+            "⚠️ That does not appear to be a valid Telegram channel invite link.\n\n"
+            "Please paste a valid link (e.g. <code>https://t.me/+AbCdEf12345</code>), "
+            "or tap <b>Cancel Verification</b> below.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("⚡ Use Default Configured Channel Link", callback_data=f"admin:verify_default:{reference}")],
+                    [InlineKeyboardButton("❌ Cancel Verification", callback_data=f"admin:verify_cancel:{reference}")],
+                ]
+            ),
+        )
+        return ADMIN_VERIFY_LINK_INPUT
+
+    db = get_db(context)
+    submission = await db.submissions.find_one({"reference": reference})
+    if not submission:
+        await update.message.reply_text("❌ Submission not found in database.")
+        context.user_data.pop("admin_verify", None)
+        return ConversationHandler.END
+
+    orig_message = verify_data.get("orig_message")
+    prompt_msg_id = verify_data.get("prompt_msg_id")
+    if prompt_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=prompt_msg_id)
+        except Exception:
+            pass
+
+    success = await complete_payment_verification(
+        update=update,
+        context=context,
+        submission=submission,
+        invite_link=norm_link,
+        orig_message=orig_message,
+    )
+    context.user_data.pop("admin_verify", None)
+
+    if success:
+        service_name = submission.get("service_name", SERVICE_NAMES.get(submission.get("service"), ""))
+        await update.message.reply_text(
+            "✅ <b>Payment Verified & Invite Link Sent!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Reference:</b> <code>{reference}</code>\n"
+            f"• <b>Service:</b> {html.escape(service_name)}\n"
+            f"• <b>Delivered Link:</b> <code>{html.escape(norm_link)}</code>\n\n"
+            "The customer has received their confirmation with the VIP channel button.",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ Submission <code>{reference}</code> was already processed or is no longer pending.",
+            parse_mode=ParseMode.HTML,
+        )
+    return ConversationHandler.END
+
+
+async def receive_admin_verify_default(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    reference = query.data.split(":", 2)[2]
+    verify_data = context.user_data.get("admin_verify", {})
+    orig_message = verify_data.get("orig_message")
+
+    db = get_db(context)
+    submission = await db.submissions.find_one({"reference": reference})
+    if not submission:
+        await query.edit_message_text("❌ Submission not found.")
+        context.user_data.pop("admin_verify", None)
+        return ConversationHandler.END
+
+    default_channel = await get_link(context, "pawns_channel")
+    success = await complete_payment_verification(
+        update=update,
+        context=context,
+        submission=submission,
+        invite_link=default_channel,
+        orig_message=orig_message,
+    )
+    context.user_data.pop("admin_verify", None)
+
+    if success:
+        await query.edit_message_text(
+            "✅ <b>Payment Verified with Default Channel Link</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Reference:</b> <code>{reference}</code>\n"
+            f"• <b>Channel Link Delivered:</b> <code>{html.escape(default_channel or 'None')}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await query.edit_message_text(
+            f"⚠️ Submission <code>{reference}</code> was already processed or is no longer pending.",
+            parse_mode=ParseMode.HTML,
+        )
+    return ConversationHandler.END
+
+
+async def receive_admin_verify_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer("Verification cancelled.")
+    context.user_data.pop("admin_verify", None)
+    await query.edit_message_text(
+        "❌ <b>Verification Cancelled</b>\n"
+        "The submission remains in PENDING status.",
+        parse_mode=ParseMode.HTML,
+    )
+    return ConversationHandler.END
+
+
+async def admin_verify_cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop("admin_verify", None)
+    await update.message.reply_text(
+        "❌ Verification cancelled. The payment submission remains in PENDING status."
+    )
+    return ConversationHandler.END
+
+
 async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     settings = get_settings(context)
@@ -2627,17 +3022,32 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             LOGGER.warning("Could not send reqinfo to user %s: %s", submission["telegram_id"], exc)
         return
 
-    payment_status = "VERIFIED ✅" if action == "verify" else "REJECTED"
-    onboarding_status = "Pending Details" if action == "verify" else "Rejected"
+    if action == "verify":
+        submission = await db.submissions.find_one({"reference": reference, "payment_status": "PENDING"})
+        if not submission:
+            current = await db.submissions.find_one({"reference": reference})
+            curr_status = current.get("payment_status", "not found") if current else "not found"
+            await query.answer(f"No change made. Current status: {curr_status}", show_alert=True)
+            return
+        await query.answer("Payment verified.")
+        await complete_payment_verification(
+            update=update,
+            context=context,
+            submission=submission,
+            invite_link=None,
+            orig_message=query.message,
+        )
+        return
 
+    # action == "reject"
     submission = await db.submissions.find_one_and_update(
         {"reference": reference, "payment_status": "PENDING"},
         {
             "$set": {
-                "payment_status": payment_status,
-                "onboarding_status": onboarding_status,
+                "payment_status": "REJECTED",
+                "onboarding_status": "Rejected",
                 "admin_verification_status": {
-                    "decision": "Approved" if action == "verify" else "Rejected",
+                    "decision": "Rejected",
                     "reviewed_by": admin_user.id,
                     "reviewed_at": now,
                 },
@@ -2654,116 +3064,35 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await db.audit.insert_one(
         {
-            "action": f"payment_{action}",
+            "action": "payment_reject",
             "reference": reference,
             "admin_id": admin_user.id,
             "created_at": now,
         }
     )
-    await query.answer(f"Payment marked {payment_status}.")
+    await query.answer("Payment marked REJECTED.")
 
-    try:
-        await query.edit_message_text(
-            admin_submission_text(submission)
-            + f"\n\n<b>Decision:</b> {payment_status}\n"
-            f"<b>Reviewed by:</b> {html.escape(admin_user.full_name)}",
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-    except BadRequest:
-        pass
+    rev_text = (
+        admin_submission_text(submission)
+        + f"\n\n<b>Decision:</b> REJECTED\n"
+        f"<b>Reviewed by:</b> {html.escape(admin_user.full_name)}"
+    )
+    await edit_admin_review_message(query.message, rev_text, reply_markup=None)
 
     service = submission["service"]
     service_name = submission.get("service_name", SERVICE_NAMES.get(service, service))
-
-    if action == "verify":
-        if service == "private":
-            user_message = (
-                f"🎉 <b>Payment Status: VERIFIED ✅</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Your investment payment of <b>${html.escape(str(submission.get('amount', '')))} "
-                f"{html.escape(submission.get('currency', ''))}</b> for <b>{html.escape(service_name)}</b> "
-                f"(Ref: <code>{reference}</code>) has been confirmed!\n\n"
-                "👉 <b>Next Step — Complete Investor Onboarding:</b>\n"
-                "Please tap below to confirm your investor details and receive your portal access."
-            )
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("📝 Complete Onboarding", callback_data=f"onboard_start:{reference}")],
-                    [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")],
-                ]
-            )
-        else:
-            duration_key = submission.get("duration_key", "1m")
-            days = DURATION_DAYS.get(duration_key, 30)
-            expires_at = now + timedelta(days=days)
-
-            sub_doc = {
-                "telegram_id": submission["telegram_id"],
-                "telegram_username": submission.get("telegram_username"),
-                "reference": reference,
-                "service": service,
-                "service_name": service_name,
-                "track": submission.get("track", "standard"),
-                "duration_key": duration_key,
-                "duration_days": days,
-                "start_date": now,
-                "expires_at": expires_at,
-                "status": "active",
-                "expiry_warning_sent": False,
-                "created_at": now,
-                "updated_at": now,
-            }
-            await db.subscriptions.insert_one(sub_doc)
-            await db.users.update_one(
-                {"telegram_id": submission["telegram_id"]},
-                {
-                    "$set": {
-                        f"subscriptions.{service}": {
-                            "status": "active",
-                            "expires_at": expires_at,
-                            "reference": reference,
-                            "duration_key": duration_key,
-                        },
-                        "updated_at": now,
-                    }
-                },
-            )
-
-            channel_url = await get_link(context, "pawns_channel")
-            channel_buttons = []
-            if is_http_url(channel_url):
-                channel_buttons.append([InlineKeyboardButton("🚀 Join VIP Trading Channel", url=channel_url)])
-            channel_buttons.append([InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")])
-
-            dur_label = DURATION_LABELS.get(duration_key, duration_key)
-            user_message = (
-                f"🎉 <b>Payment Status: VERIFIED ✅</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Your payment of <b>${html.escape(str(submission.get('amount', '')))} "
-                f"{html.escape(submission.get('currency', ''))}</b> for <b>{html.escape(service_name)}</b> "
-                f"(Ref: <code>{reference}</code>) has been confirmed!\n\n"
-                f"<b>Subscription Period:</b> {html.escape(dur_label)} ({days} days)\n"
-                f"<b>Expires On:</b> {expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-                "👉 <b>Join the VIP Channel:</b>\n"
-                "Use the button below to join the private VIP channel and receive signals."
-            )
-            keyboard = InlineKeyboardMarkup(channel_buttons)
-
-        await process_referral_on_payment_verified(context, submission)
-    else:
-        support_url = await get_link(context, "support")
-        user_message = (
-            f"❌ <b>Payment Status: REJECTED</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Your payment for <b>{html.escape(service_name)}</b> (Ref: <code>{reference}</code>) was not approved.\n\n"
-            "Please contact support with your transaction details or to submit a corrected payment reference."
-        )
-        buttons = []
-        if is_http_url(support_url):
-            buttons.append([InlineKeyboardButton("🛟 Contact PAWNS Support", url=support_url)])
-        buttons.append([InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")])
-        keyboard = InlineKeyboardMarkup(buttons)
+    support_url = await get_link(context, "support")
+    user_message = (
+        f"❌ <b>Payment Status: REJECTED</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Your payment for <b>{html.escape(service_name)}</b> (Ref: <code>{reference}</code>) was not approved.\n\n"
+        "Please contact support with your transaction details or to submit a corrected payment reference."
+    )
+    buttons = []
+    if is_http_url(support_url):
+        buttons.append([InlineKeyboardButton("🛟 Contact PAWNS Support", url=support_url)])
+    buttons.append([InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")])
+    keyboard = InlineKeyboardMarkup(buttons)
 
     try:
         await context.bot.send_message(
@@ -4835,6 +5164,26 @@ def build_application(settings: Settings) -> Application:
         name="admin_announcement",
     )
     application.add_handler(admin_announcement_conv)
+
+    admin_verify_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(admin_review_verify_entry, pattern=r"^admin:verify:BM-\d{8}-[A-F0-9]{8}$"),
+        ],
+        states={
+            ADMIN_VERIFY_LINK_INPUT: [
+                CallbackQueryHandler(receive_admin_verify_default, pattern=r"^admin:verify_default:BM-\d{8}-[A-F0-9]{8}$"),
+                CallbackQueryHandler(receive_admin_verify_cancel, pattern=r"^admin:verify_cancel:BM-\d{8}-[A-F0-9]{8}$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_admin_verify_link),
+            ],
+        },
+        fallbacks=[
+            CommandHandler(["cancel", "menu", "start", "stop"], admin_verify_cancel_cmd),
+            CallbackQueryHandler(receive_admin_verify_cancel, pattern=r"^admin:verify_cancel:BM-\d{8}-[A-F0-9]{8}$"),
+        ],
+        allow_reentry=True,
+        name="admin_verify",
+    )
+    application.add_handler(admin_verify_conv)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler(["menu", "services", "cancel", "stop"], show_main_menu))
