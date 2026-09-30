@@ -40,7 +40,7 @@ import secrets
 import uuid
 import warnings
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 from urllib.parse import urlparse
@@ -87,17 +87,25 @@ logging.basicConfig(
 LOGGER = logging.getLogger("PAWNS")
 
 
-# Conversation states
+# Conversation states for Registration & Payment
 (
     FULL_NAME,
     INVESTMENT_AMOUNT,
     RISK_CATEGORY,
     DURATION,
     CONSENT,
+    SELECT_PAYMENT_METHOD,
     PAYMENT_DETAILS,
     AWAIT_TXID,
+    AWAIT_NAIRA_RECEIPT,
     ONBOARDING_INPUT,
-) = range(8)
+) = range(10)
+
+# Standalone conversation states
+(BINGX_UID_INPUT,) = range(10, 11)
+(INVESTOR_WITHDRAW_INPUT,) = range(20, 21)
+(INVESTOR_TERMINATE_INPUT,) = range(30, 31)
+(ADMIN_REPORT_INPUT,) = range(40, 41)
 
 
 SERVICE_NAMES = {
@@ -108,11 +116,41 @@ SERVICE_NAMES = {
     "synthetic": "Synthetic Trading",
 }
 
+# Crypto Futures Fee Schedules
+CRYPTO_BINGX_FEES = {
+    "1m": Decimal("40"),
+    "3m": Decimal("90"),
+    "6m": Decimal("200"),
+    "12m": Decimal("300"),
+}
+
+CRYPTO_STANDARD_FEES = {
+    "1m": Decimal("100"),
+    "3m": Decimal("149.9"),
+    "6m": Decimal("400"),
+    "12m": Decimal("500"),
+}
+
+FOREX_FEES = {
+    "1m": Decimal("100"),
+    "3m": Decimal("200"),
+    "6m": Decimal("400"),
+    "12m": Decimal("500"),
+}
+
+DURATION_DAYS = {
+    "1m": 30,
+    "2m": 60,
+    "3m": 90,
+    "6m": 180,
+    "12m": 365,
+}
+
 SERVICE_FEES = {
-    "crypto": "$50 PAWNS service fee",
-    "forex_live": "$50 PAWNS service fee",
-    "forex_prop": "$50 PAWNS service fee (separate from any prop-firm challenge fee)",
-    "synthetic": "$20 PAWNS service fee",
+    "crypto": "$40 - $500 depending on exchange & duration",
+    "forex_live": "$100 - $500 depending on duration",
+    "forex_prop": "$100 - $500 depending on duration (separate from challenge fees)",
+    "synthetic": "Coming soon",
 }
 
 INVESTMENT_PLANS = {
@@ -121,11 +159,37 @@ INVESTMENT_PLANS = {
 }
 
 DURATION_LABELS = {
+    "1m": "1 month",
     "2m": "2 months",
     "3m": "3 months",
     "6m": "6 months",
     "12m": "1 year",
 }
+
+# Tiered Referral System Schedules (Paid Referrals Only)
+# Format: (min_paid_referrals, commission_rate_percentage)
+TRADING_REFERRAL_TIERS = [
+    (100, Decimal("25")),  # 100+ paid referrals -> 25%
+    (50, Decimal("20")),   # 50-99 paid referrals -> 20%
+    (25, Decimal("15")),   # 25-49 paid referrals -> 15%
+    (15, Decimal("12")),   # 15-24 paid referrals -> 12%
+    (5, Decimal("10")),    # 5-14 paid referrals  -> 10%
+    (0, Decimal("7")),     # 0-4 paid referrals   -> 7% (Base)
+]
+INVESTMENT_REFERRAL_RATE = Decimal("10")  # 10% of referral profits for private investment
+
+
+def get_trading_referral_tier(paid_count: int) -> tuple[Decimal, int, int | None]:
+    """
+    Returns (rate_percentage, current_tier_min, next_tier_min).
+    Example for paid_count=7: returns (Decimal("10"), 5, 15).
+    """
+    for idx, (min_refs, rate) in enumerate(TRADING_REFERRAL_TIERS):
+        if paid_count >= min_refs:
+            next_tier_min = TRADING_REFERRAL_TIERS[idx - 1][0] if idx > 0 else None
+            return rate, min_refs, next_tier_min
+    return Decimal("7"), 0, 5
+
 
 LINK_SETTING_KEYS = {
     "bingx": "BINGX_URL",
@@ -135,6 +199,14 @@ LINK_SETTING_KEYS = {
     "support": "SUPPORT_URL",
     "terms": "TERMS_URL",
     "investment_terms": "INVESTMENT_TERMS_URL",
+    "pawns_channel": "PAWNS_CHANNEL_URL",
+    "investor_portal_bot": "INVESTOR_PORTAL_BOT_URL",
+    "broker_1": "BROKER_1_URL",
+    "broker_2": "BROKER_2_URL",
+    "broker_3": "BROKER_3_URL",
+    "prop_1": "PROP_FIRM_1_URL",
+    "prop_2": "PROP_FIRM_2_URL",
+    "prop_3": "PROP_FIRM_3_URL",
 }
 
 FORBIDDEN_SECRET_RE = re.compile(
@@ -213,6 +285,24 @@ class Settings:
     private_investment_enabled: bool
     minimum_investment: Decimal
     commission_percent: Decimal
+    usd_ngn_rate: Decimal = Decimal("1400")
+    naira_bank_name: str = "Zenith Bank"
+    naira_account_number: str = "1234567890"
+    naira_account_name: str = "PAWNS Trading Services"
+    pawns_channel_url: str = "https://t.me/pawns_channel_placeholder"
+    investor_portal_bot_url: str = "https://t.me/pawns_investor_bot_placeholder"
+    broker_1_name: str = "Exness"
+    broker_1_url: str = "https://example.com/exness-partner"
+    broker_2_name: str = "HFM (HotForex)"
+    broker_2_url: str = "https://example.com/hfm-partner"
+    broker_3_name: str = "Deriv Forex"
+    broker_3_url: str = "https://example.com/deriv-partner"
+    prop_1_name: str = "Naira Trader"
+    prop_1_url: str = "https://example.com/nairatrader"
+    prop_2_name: str = "Naira Prop"
+    prop_2_url: str = "https://www.nairaprop.com/?ref=USER1D63"
+    prop_3_name: str = "Global Dollar Prop"
+    prop_3_url: str = "https://example.com/dollarprop"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -250,6 +340,32 @@ class Settings:
             "PAYMENT_INSTRUCTIONS_TRADING",
             "Send exact USD / USDT equivalent via BSC / BEP20 network only.",
         ).strip()
+
+        try:
+            usd_ngn_rate = Decimal(os.getenv("USD_NGN_RATE", "1400"))
+        except InvalidOperation:
+            usd_ngn_rate = Decimal("1400")
+
+        naira_bank = os.getenv("NAIRA_BANK_NAME", "Zenith Bank").strip()
+        naira_acc_num = os.getenv("NAIRA_ACCOUNT_NUMBER", "1234567890").strip()
+        naira_acc_name = os.getenv("NAIRA_ACCOUNT_NAME", "PAWNS Trading Services").strip()
+
+        pawns_channel = os.getenv("PAWNS_CHANNEL_URL", "https://t.me/pawns_channel_placeholder").strip()
+        investor_bot = os.getenv("INVESTOR_PORTAL_BOT_URL", "https://t.me/pawns_investor_bot_placeholder").strip()
+
+        broker_1_name = os.getenv("BROKER_1_NAME", "Exness").strip()
+        broker_1_url = os.getenv("BROKER_1_URL", "https://example.com/exness-partner").strip()
+        broker_2_name = os.getenv("BROKER_2_NAME", "HFM (HotForex)").strip()
+        broker_2_url = os.getenv("BROKER_2_URL", "https://example.com/hfm-partner").strip()
+        broker_3_name = os.getenv("BROKER_3_NAME", "Deriv Forex").strip()
+        broker_3_url = os.getenv("BROKER_3_URL", "https://example.com/deriv-partner").strip()
+
+        prop_1_name = os.getenv("PROP_FIRM_1_NAME", "Naira Trader").strip()
+        prop_1_url = os.getenv("PROP_FIRM_1_URL", "https://example.com/nairatrader").strip()
+        prop_2_name = os.getenv("PROP_FIRM_2_NAME", "Naira Prop").strip()
+        prop_2_url = os.getenv("PROP_FIRM_2_URL", "https://www.nairaprop.com/?ref=USER1D63").strip()
+        prop_3_name = os.getenv("PROP_FIRM_3_NAME", "Global Dollar Prop").strip()
+        prop_3_url = os.getenv("PROP_FIRM_3_URL", "https://example.com/dollarprop").strip()
 
         mode = os.getenv("RUN_MODE", "polling").strip().lower()
         if mode not in {"polling", "webhook"}:
@@ -307,6 +423,24 @@ class Settings:
             private_investment_enabled=env_bool("PRIVATE_INVESTMENT_ENABLED", False),
             minimum_investment=minimum,
             commission_percent=commission,
+            usd_ngn_rate=usd_ngn_rate,
+            naira_bank_name=naira_bank,
+            naira_account_number=naira_acc_num,
+            naira_account_name=naira_acc_name,
+            pawns_channel_url=pawns_channel,
+            investor_portal_bot_url=investor_bot,
+            broker_1_name=broker_1_name,
+            broker_1_url=broker_1_url,
+            broker_2_name=broker_2_name,
+            broker_2_url=broker_2_url,
+            broker_3_name=broker_3_name,
+            broker_3_url=broker_3_url,
+            prop_1_name=prop_1_name,
+            prop_1_url=prop_1_url,
+            prop_2_name=prop_2_name,
+            prop_2_url=prop_2_url,
+            prop_3_name=prop_3_name,
+            prop_3_url=prop_3_url,
         )
 
 
@@ -351,17 +485,60 @@ class AsyncCursorWrapper:
 
 
 
+def _get_nested(doc: dict[str, Any], key: str) -> Any:
+    if "." in key:
+        parts = key.split(".")
+        current = doc
+        for part in parts:
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current
+    return doc.get(key)
+
+
+def _set_nested(doc: dict[str, Any], key: str, value: Any) -> None:
+    if "." in key:
+        parts = key.split(".")
+        current = doc
+        for part in parts[:-1]:
+            if part not in current or not isinstance(current[part], dict):
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = copy.deepcopy(value)
+    else:
+        doc[key] = copy.deepcopy(value)
+
+
 def _matches(doc: dict[str, Any], filter_dict: dict[str, Any]) -> bool:
     for k, v in filter_dict.items():
         if k == "$or":
             if not any(_matches(doc, cond) for cond in v):
                 return False
             continue
-        doc_val = doc.get(k)
+        doc_val = _get_nested(doc, k)
         if isinstance(v, dict):
             if "$exists" in v:
-                exists = k in doc and doc[k] is not None
+                exists = doc_val is not None
                 if exists != v["$exists"]:
+                    return False
+            if "$in" in v:
+                if doc_val not in v["$in"]:
+                    return False
+            if "$ne" in v:
+                if doc_val == v["$ne"]:
+                    return False
+            if "$lte" in v:
+                if doc_val is None or doc_val > v["$lte"]:
+                    return False
+            if "$gte" in v:
+                if doc_val is None or doc_val < v["$gte"]:
+                    return False
+            if "$gt" in v:
+                if doc_val is None or doc_val <= v["$gt"]:
+                    return False
+            if "$lt" in v:
+                if doc_val is None or doc_val >= v["$lt"]:
                     return False
         else:
             if doc_val != v:
@@ -371,10 +548,11 @@ def _matches(doc: dict[str, Any], filter_dict: dict[str, Any]) -> bool:
 
 def _apply_update(doc: dict[str, Any], update_dict: dict[str, Any], is_insert: bool = False) -> None:
     if "$set" in update_dict:
-        doc.update(copy.deepcopy(update_dict["$set"]))
+        for k, v in update_dict["$set"].items():
+            _set_nested(doc, k, v)
     if is_insert and "$setOnInsert" in update_dict:
         for k, v in update_dict["$setOnInsert"].items():
-            doc[k] = copy.deepcopy(v)
+            _set_nested(doc, k, v)
 
 
 class InMemoryCollection:
@@ -446,16 +624,24 @@ class InMemoryCollection:
 
     async def aggregate(self, pipeline: list[dict[str, Any]]) -> AsyncCursorWrapper:
         match_stage: dict[str, Any] = {}
+        group_field = "currency"
         for stage in pipeline:
             if "$match" in stage:
                 match_stage = stage["$match"]
+            if "$group" in stage:
+                raw_id = stage["$group"].get("_id", "$currency")
+                if isinstance(raw_id, str) and raw_id.startswith("$"):
+                    group_field = raw_id[1:]
         matched = [d for d in self.docs if _matches(d, match_stage)]
         grouped: dict[str, Decimal] = {}
         for d in matched:
-            curr = d.get("currency", "USD")
+            if group_field == "program":
+                key = str(d.get("program") or ("private_investment" if d.get("service") == "private" else "trading_subscriptions"))
+            else:
+                key = str(d.get(group_field, "USD"))
             share = Decimal(str(d.get("referrer_share", "0")))
-            grouped[curr] = grouped.get(curr, Decimal("0")) + share
-        results = [{"_id": curr, "total": total} for curr, total in grouped.items()]
+            grouped[key] = grouped.get(key, Decimal("0")) + share
+        results = [{"_id": key, "total": total} for key, total in grouped.items()]
         return AsyncCursorWrapper(results)
 
 
@@ -486,6 +672,11 @@ class Database:
             self.settings = self.db.settings
             self.commissions = self.db.commission_events
             self.audit = self.db.audit_log
+            self.subscriptions = self.db.subscriptions
+            self.withdrawals = self.db.withdrawals
+            self.reports = self.db.reports
+            self.bingx_verifications = self.db.bingx_verifications
+            self.terminations = self.db.terminations
         else:
             self._init_memory_db()
 
@@ -497,6 +688,11 @@ class Database:
         self.settings = InMemoryCollection("settings")
         self.commissions = InMemoryCollection("commissions")
         self.audit = InMemoryCollection("audit")
+        self.subscriptions = InMemoryCollection("subscriptions")
+        self.withdrawals = InMemoryCollection("withdrawals")
+        self.reports = InMemoryCollection("reports")
+        self.bingx_verifications = InMemoryCollection("bingx_verifications")
+        self.terminations = InMemoryCollection("terminations")
 
     async def initialize(self) -> None:
         if self.is_memory_mode:
@@ -508,12 +704,20 @@ class Database:
             await self.users.create_index("telegram_id", unique=True)
             await self.users.create_index("referral_id", unique=True)
             await self.users.create_index("referred_by")
+            await self.users.create_index([("referred_by", ASCENDING), ("is_paid_referral", ASCENDING)])
             await self.submissions.create_index("reference", unique=True)
             await self.submissions.create_index([("telegram_id", ASCENDING), ("created_at", ASCENDING)])
             await self.submissions.create_index("payment_status")
             await self.submissions.create_index("txid")
             await self.commissions.create_index([("referrer_telegram_id", ASCENDING), ("status", ASCENDING)])
             await self.audit.create_index("created_at")
+            await self.subscriptions.create_index("telegram_id")
+            await self.subscriptions.create_index("status")
+            await self.subscriptions.create_index("expires_at")
+            await self.withdrawals.create_index("reference", unique=True)
+            await self.reports.create_index("reference", unique=True)
+            await self.bingx_verifications.create_index("telegram_id")
+            await self.terminations.create_index("reference", unique=True)
             LOGGER.info("Connected to MongoDB successfully; database indexes ready")
         except (ServerSelectionTimeoutError, ConnectionFailure, PyMongoError, OSError) as exc:
             LOGGER.warning(
@@ -543,6 +747,7 @@ class Database:
                     "referral_id": referral_id,
                     "registered_at": now,
                     "referral_earnings": "0",
+                    "is_paid_referral": False,
                 },
             },
             upsert=True,
@@ -565,6 +770,7 @@ class Database:
                 "$set": {
                     "referred_by": referrer["telegram_id"],
                     "referral_at": utc_now(),
+                    "is_paid_referral": False,
                 }
             },
         )
@@ -601,6 +807,8 @@ async def get_service_payment_info(
     context: ContextTypes.DEFAULT_TYPE,
     service: str,
     investment_amount: str | None = None,
+    duration: str | None = None,
+    track: str | None = None,
 ) -> dict[str, Any]:
     db = get_db(context)
     settings = get_settings(context)
@@ -621,14 +829,30 @@ async def get_service_payment_info(
             settings.payment_instructions_trading,
         )
         currency = "USD / USDT"
-        fee_map = {
-            "crypto": ("fee_crypto", settings.fee_crypto),
-            "forex_live": ("fee_forex_live", settings.fee_forex_live),
-            "forex_prop": ("fee_forex_prop", settings.fee_forex_prop),
-            "synthetic": ("fee_synthetic", settings.fee_synthetic),
-        }
-        key, default_fee = fee_map[service]
-        amount = await db.get_setting(key, str(default_fee))
+        if duration is None:
+            if service == "crypto":
+                amount = await db.get_setting("fee_crypto", str(settings.fee_crypto))
+            elif service == "forex_live":
+                amount = await db.get_setting("fee_forex_live", str(settings.fee_forex_live))
+            elif service == "forex_prop":
+                amount = await db.get_setting("fee_forex_prop", str(settings.fee_forex_prop))
+            elif service == "synthetic":
+                amount = await db.get_setting("fee_synthetic", str(settings.fee_synthetic))
+            else:
+                amount = str(settings.fee_crypto)
+        else:
+            dur_key = duration
+            if service == "crypto":
+                if track == "bingx":
+                    amount = str(CRYPTO_BINGX_FEES.get(dur_key, Decimal("40")))
+                else:
+                    amount = str(CRYPTO_STANDARD_FEES.get(dur_key, Decimal("100")))
+            elif service in ("forex_live", "forex_prop"):
+                amount = str(FOREX_FEES.get(dur_key, Decimal("100")))
+            elif service == "synthetic":
+                amount = await db.get_setting("fee_synthetic", str(settings.fee_synthetic))
+            else:
+                amount = str(settings.fee_crypto)
 
     return {
         "service": service,
@@ -638,12 +862,36 @@ async def get_service_payment_info(
         "network": network,
         "wallet": wallet,
         "instructions": instructions,
+        "duration": duration,
+        "track": track,
     }
 
 
-def render_payment_screen(payment_info: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+def render_payment_method_screen(
+    service_name: str,
+    amount_usd: str,
+    duration_label: str = "",
+) -> tuple[str, InlineKeyboardMarkup]:
+    dur_text = f"<b>Duration:</b> {html.escape(duration_label)}\n" if duration_label else ""
     text = (
-        "💳 <b>PAYMENT DETAILS</b>\n"
+        "💳 <b>SELECT PAYMENT METHOD</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Service:</b> {html.escape(service_name)}\n"
+        f"{dur_text}"
+        f"<b>Amount:</b> ${html.escape(str(amount_usd))} USD\n\n"
+        "Select your preferred payment method below:"
+    )
+    buttons = [
+        [InlineKeyboardButton("🌐 Crypto (USDT)", callback_data="paymethod:crypto")],
+        [InlineKeyboardButton("🇳🇬 Naira (Bank Transfer)", callback_data="paymethod:naira")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="pay:cancel")],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
+
+
+def render_crypto_payment_screen(payment_info: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "💳 <b>CRYPTO PAYMENT DETAILS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Service:</b> {html.escape(payment_info['service_name'])}\n"
         f"<b>Amount:</b> ${html.escape(str(payment_info['amount']))}\n"
@@ -662,6 +910,47 @@ def render_payment_screen(payment_info: dict[str, Any]) -> tuple[str, InlineKeyb
     ]
     return text, InlineKeyboardMarkup(buttons)
 
+
+def render_naira_payment_screen(
+    payment_info: dict[str, Any],
+    settings: Settings,
+    usd_rate: Decimal,
+) -> tuple[str, InlineKeyboardMarkup]:
+    usd_amount = Decimal(payment_info["amount"])
+    ngn_amount = int(usd_amount * usd_rate)
+    bank_name = settings.naira_bank_name
+    acc_num = settings.naira_account_number
+    acc_name = settings.naira_account_name
+    dur_label = DURATION_LABELS.get(payment_info.get("duration", ""), "")
+    dur_text = f"<b>Duration:</b> {html.escape(dur_label)}\n" if dur_label else ""
+
+    text = (
+        "🇳🇬 <b>NAIRA BANK PAYMENT INSTRUCTIONS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Service:</b> {html.escape(payment_info['service_name'])}\n"
+        f"{dur_text}"
+        f"<b>USD Equivalent:</b> ${usd_amount} USD\n"
+        f"<b>Exchange Rate:</b> ₦{usd_rate:,} / $1 USD\n"
+        f"<b>Amount Payable:</b> <b>₦{ngn_amount:,} NGN</b>\n\n"
+        "<b>PAWNS Bank Details:</b>\n"
+        f"• <b>Bank Name:</b> {html.escape(bank_name)}\n"
+        f"• <b>Account Number:</b> <code>{html.escape(acc_num)}</code>\n"
+        f"• <b>Account Name:</b> {html.escape(acc_name)}\n\n"
+        "⚠️ <b>INSTRUCTIONS:</b>\n"
+        "1. Transfer the exact amount shown above to the designated account.\n"
+        "2. Tap <b>'📤 I've Transferred (Send Receipt)'</b> below.\n"
+        "3. Send your transaction screenshot or receipt as an image or document."
+    )
+    buttons = [
+        [InlineKeyboardButton("📤 I've Transferred (Send Receipt)", callback_data="pay:confirm_naira")],
+        [InlineKeyboardButton("📋 Copy Account Number", copy_text=CopyTextButton(text=acc_num))],
+        [InlineKeyboardButton("❌ Cancel", callback_data="pay:cancel")],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
+
+
+def render_payment_screen(payment_info: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    return render_crypto_payment_screen(payment_info)
 
 
 def get_settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
@@ -687,7 +976,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("♟️ Private Investment", callback_data="service:private")],
             [InlineKeyboardButton("📈 Crypto Futures", callback_data="service:crypto")],
             [InlineKeyboardButton("💱 Forex Trading", callback_data="service:forex")],
-            [InlineKeyboardButton("📊 Synthetic Trading", callback_data="service:synthetic")],
+            [InlineKeyboardButton("📊 Synthetic Trading (Coming Soon)", callback_data="service:synthetic")],
             [InlineKeyboardButton("🤝 Referral Program", callback_data="referral")],
             [
                 InlineKeyboardButton("ℹ️ About", callback_data="about"),
@@ -787,6 +1076,47 @@ async def get_link(context: ContextTypes.DEFAULT_TYPE, short_key: str) -> str:
 
 
 async def show_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    db = get_db(context)
+    user_doc = await db.users.find_one({"telegram_id": user.id}) if user else None
+    is_active_investor = bool(user_doc and user_doc.get("investor_status") == "active")
+
+    if is_active_investor:
+        inv = user_doc.get("investor_details", {})
+        amt = inv.get("amount", "0")
+        risk = str(inv.get("risk", "Low")).title()
+        dur = inv.get("duration", "N/A")
+        ret = inv.get("proposed_return", "N/A")
+        start_date = inv.get("start_date", "")
+        start_str = start_date.strftime("%Y-%m-%d") if isinstance(start_date, datetime) else str(start_date)[:10] if start_date else "Active"
+        ref = inv.get("reference", "N/A")
+
+        text = (
+            "♟️ <b>PAWNS INVESTOR HUB</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Welcome back, <b>{html.escape(user.full_name)}</b>!\n\n"
+            "<b>Your Active Investment Portfolio:</b>\n"
+            f"• <b>Reference:</b> <code>{html.escape(ref)}</code>\n"
+            f"• <b>Invested Principal:</b> ${html.escape(str(amt))} USDT\n"
+            f"• <b>Risk Profile:</b> {html.escape(risk)}\n"
+            f"• <b>Duration:</b> {html.escape(str(dur))}\n"
+            f"• <b>Proposed Return:</b> {html.escape(str(ret))}\n"
+            f"• <b>Started:</b> {html.escape(start_str)}\n"
+            "• <b>Status:</b> <code>ACTIVE ✅</code>\n\n"
+            "Use the options below to manage your investment or contact support:"
+        )
+        support_url = await get_link(context, "support")
+        buttons = [
+            [InlineKeyboardButton("📊 Request Report", callback_data="inv:report")],
+            [InlineKeyboardButton("💸 Request Withdrawal", callback_data="inv:withdraw")],
+            [InlineKeyboardButton("📄 Termination of Contract", callback_data="inv:terminate")],
+        ]
+        if is_http_url(support_url):
+            buttons.append([InlineKeyboardButton("💬 Talk to Team / Support", url=support_url)])
+        buttons.append([InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="menu")])
+        await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+        return
+
     settings = get_settings(context)
     terms_url = await get_link(context, "investment_terms")
     start_label = "💰 Invest Now" if settings.private_investment_enabled else "🔒 Registration not yet enabled"
@@ -826,35 +1156,125 @@ async def show_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def show_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bingx_url = await get_link(context, "bingx")
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("💳 Pay $50 / Start Registration", callback_data="register:crypto")],
-            [configurable_link_button("🔗 BingX Registration", bingx_url, "bingx")],
-            [InlineKeyboardButton("📋 Already Have a BingX UID?", callback_data="register:crypto")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="menu")],
+    text = (
+        "📈 <b>PAWNS CRYPTO FUTURES TRADING</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Access high-accuracy PAWNS crypto futures trading signals and updates.\n\n"
+        "<b>Available Tracks:</b>\n"
+        "• <b>BingX Users:</b> Special discounted pricing from <b>$40/month</b> to <b>$300/year</b>.\n"
+        "• <b>Other Exchanges:</b> Standard pricing from <b>$100/month</b>.\n\n"
+        "Select an option below to proceed:"
+    )
+    support_url = await get_link(context, "support")
+    buttons = [
+        [InlineKeyboardButton("📋 View Service Fees & Pricing", callback_data="crypto:fees")],
+        [InlineKeyboardButton("⚡ BingX User Track (Discounted)", callback_data="crypto:bingx_start")],
+        [InlineKeyboardButton("🌐 Other Exchanges Track (Standard)", callback_data="crypto:standard_start")],
+    ]
+    if is_http_url(support_url):
+        buttons.append([InlineKeyboardButton("🛟 Contact Support", url=support_url)])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="menu")])
+    await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
+
+async def show_crypto_fees(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "📊 <b>CRYPTO FUTURES SERVICE FEES</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚡ <b>BingX Registered Users (Discounted Rates):</b>\n"
+        "• 1 Month: <b>$40</b>\n"
+        "• 3 Months: <b>$90</b>\n"
+        "• 6 Months: <b>$200</b>\n"
+        "• 1 Year: <b>$300</b>\n\n"
+        "🌐 <b>Other Exchanges (Standard Rates):</b>\n"
+        "• 1 Month: <b>$100</b>\n"
+        "• 3 Months: <b>$149.9</b>\n"
+        "• 6 Months: <b>$400</b>\n"
+        "• 1 Year: <b>$500</b>\n\n"
+        "<i>BingX users receive reduced fees by registering with our official link.</i>"
+    )
+    buttons = [
+        [InlineKeyboardButton("⚡ Proceed with BingX Track", callback_data="crypto:bingx_start")],
+        [InlineKeyboardButton("🌐 Proceed with Other Exchanges", callback_data="crypto:standard_start")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="service:crypto")],
+    ]
+    await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
+
+async def show_crypto_bingx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    db = get_db(context)
+    user_doc = await db.users.find_one({"telegram_id": user.id}) if user else None
+    is_bingx_verified = bool(user_doc and user_doc.get("bingx_verified"))
+
+    if is_bingx_verified:
+        uid_val = user_doc.get("bingx_uid", "Verified")
+        text = (
+            "⚡ <b>BINGX TRADING TRACK (VERIFIED)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your BingX account (UID: <code>{html.escape(str(uid_val))}</code>) is verified! ✅\n\n"
+            "Choose your discounted subscription duration:"
+        )
+        buttons = [
+            [InlineKeyboardButton("1 Month — $40", callback_data="cf_pay:bingx:1m")],
+            [InlineKeyboardButton("3 Months — $90", callback_data="cf_pay:bingx:3m")],
+            [InlineKeyboardButton("6 Months — $200", callback_data="cf_pay:bingx:6m")],
+            [InlineKeyboardButton("1 Year — $300", callback_data="cf_pay:bingx:12m")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="service:crypto")],
         ]
+        await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+        return
+
+    bingx_url = await get_link(context, "bingx")
+    support_url = await get_link(context, "support")
+    text = (
+        "⚡ <b>BINGX TRADING TRACK</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Enjoy discounted PAWNS Crypto Futures fees by trading with our partnered exchange, BingX!\n\n"
+        "<b>Steps:</b>\n"
+        "1. Register on BingX using our official partner link.\n"
+        "2. Submit your BingX UID for quick verification.\n"
+        "3. Once verified, unlock discounted rates (from $40/mo or $300/yr)."
     )
-    await send_or_edit(
-        update,
-        "📈 <b>PAWNS CRYPTO FUTURES TRADING</b>\n\n"
-        "Access PAWNS crypto-futures onboarding.\n\n"
-        "<b>Service Fee:</b> $50\n"
-        "<b>Requirement:</b> BingX UID\n\n"
-        "Payment is confirmed only after administrator verification.",
-        keyboard,
+    buttons = [
+        [configurable_link_button("🔗 Register on BingX", bingx_url, "bingx")],
+        [InlineKeyboardButton("📋 Already Registered? Enter UID", callback_data="bingx:enter_uid")],
+    ]
+    if is_http_url(support_url):
+        buttons.append([InlineKeyboardButton("🛟 Contact Support", url=support_url)])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="service:crypto")])
+    await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
+
+async def show_crypto_standard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "🌐 <b>OTHER EXCHANGES — STANDARD TRACK</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Trade PAWNS crypto futures on your preferred exchange (Binance, Bybit, OKX, etc.).\n\n"
+        "Choose your subscription duration below to proceed to payment:"
     )
+    buttons = [
+        [InlineKeyboardButton("1 Month — $100", callback_data="cf_pay:standard:1m")],
+        [InlineKeyboardButton("3 Months — $149.9", callback_data="cf_pay:standard:3m")],
+        [InlineKeyboardButton("6 Months — $400", callback_data="cf_pay:standard:6m")],
+        [InlineKeyboardButton("1 Year — $500", callback_data="cf_pay:standard:12m")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="service:crypto")],
+    ]
+    await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
 
 
 async def show_forex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_or_edit(
         update,
-        "💱 <b>CHOOSE FOREX TRADING TYPE</b>\n\n"
-        "The $50 PAWNS service fee is separate from broker deposits or prop-firm challenge fees.",
+        "💱 <b>PAWNS FOREX TRADING</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Select your preferred forex onboarding track below.\n\n"
+        "• <b>Live Account Trading:</b> Connect with our affiliated brokers.\n"
+        "• <b>Prop Firm Trading:</b> Pass challenges and trade funded accounts with our partner prop firms.",
         InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("Live Account Trading", callback_data="service:forex_live")],
-                [InlineKeyboardButton("Prop Firm Trading", callback_data="service:forex_prop")],
+                [InlineKeyboardButton("📈 Live Account Trading", callback_data="service:forex_live")],
+                [InlineKeyboardButton("🏆 Prop Firm Trading", callback_data="service:forex_prop")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="menu")],
             ]
         ),
@@ -862,57 +1282,77 @@ async def show_forex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def show_forex_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    url = await get_link(context, "broker")
+    settings = get_settings(context)
+    b1_url = await get_link(context, "broker_1")
+    b2_url = await get_link(context, "broker_2")
+    b3_url = await get_link(context, "broker_3")
+
+    buttons = [
+        [configurable_link_button(f"🔗 {settings.broker_1_name}", b1_url, "broker_1")],
+        [configurable_link_button(f"🔗 {settings.broker_2_name}", b2_url, "broker_2")],
+        [configurable_link_button(f"🔗 {settings.broker_3_name}", b3_url, "broker_3")],
+        [InlineKeyboardButton("💳 Subscribe / Pay Service Fee", callback_data="forex_live:durations")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="service:forex")],
+    ]
     await send_or_edit(
         update,
-        "💱 <b>FOREX LIVE ACCOUNT</b>\n\n"
-        "Access PAWNS live-account onboarding.\n\n"
-        "<b>Service Fee:</b> $50\n<b>Requirement:</b> Broker account\n\n"
-        "Never send a password, private key, seed phrase, or authentication code.",
-        InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("💳 Pay $50 / Submit Details", callback_data="register:forex_live")],
-                [configurable_link_button("🔗 Broker Registration", url, "broker")],
-                [InlineKeyboardButton("⬅️ Back", callback_data="service:forex")],
-            ]
-        ),
+        "💱 <b>FOREX LIVE ACCOUNT TRADING</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Register with one of our affiliated partner brokers below, or proceed directly to pay your service fee.\n\n"
+        "⚠️ <i>Never send your trading account password, private key, or OTPs.</i>",
+        InlineKeyboardMarkup(buttons),
     )
 
 
 async def show_forex_prop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    url = await get_link(context, "prop")
+    settings = get_settings(context)
+    p1_url = await get_link(context, "prop_1")
+    p2_url = await get_link(context, "prop_2")
+    p3_url = await get_link(context, "prop_3")
+
+    buttons = [
+        [configurable_link_button(f"🔗 {settings.prop_1_name}", p1_url, "prop_1")],
+        [configurable_link_button(f"🔗 {settings.prop_2_name}", p2_url, "prop_2")],
+        [configurable_link_button(f"🔗 {settings.prop_3_name}", p3_url, "prop_3")],
+        [InlineKeyboardButton("💳 Subscribe / Pay Service Fee", callback_data="forex_prop:durations")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="service:forex")],
+    ]
     await send_or_edit(
         update,
-        "🏆 <b>FOREX PROP FIRM</b>\n\n"
-        "Access PAWNS prop-firm onboarding.\n\n"
-        "<b>PAWNS Service Fee:</b> $50\n"
-        "Any prop-firm challenge fee is separate and payable under that provider's terms.\n\n"
-        "Never send a password, private key, seed phrase, or authentication code.",
-        InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("💳 Pay $50 / Submit Details", callback_data="register:forex_prop")],
-                [configurable_link_button("🔗 Prop Firm Registration", url, "prop")],
-                [InlineKeyboardButton("⬅️ Back", callback_data="service:forex")],
-            ]
-        ),
+        "🏆 <b>FOREX PROP FIRM TRADING</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Get funded with our partnered prop firms below, or proceed directly to pay your PAWNS onboarding service fee.\n\n"
+        "<i>Prop firm challenge fees are payable under that provider's platform.</i>",
+        InlineKeyboardMarkup(buttons),
     )
 
 
+async def show_forex_durations(update: Update, context: ContextTypes.DEFAULT_TYPE, forex_type: str) -> None:
+    title = "Live Account" if forex_type == "live" else "Prop Firm"
+    back_target = f"service:forex_{forex_type}"
+    text = (
+        f"💳 <b>FOREX {title.upper()} — SELECT DURATION</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Choose your subscription period to proceed to payment:"
+    )
+    buttons = [
+        [InlineKeyboardButton("1 Month — $100", callback_data=f"forex_pay:{forex_type}:1m")],
+        [InlineKeyboardButton("3 Months — $200", callback_data=f"forex_pay:{forex_type}:3m")],
+        [InlineKeyboardButton("6 Months — $400", callback_data=f"forex_pay:{forex_type}:6m")],
+        [InlineKeyboardButton("1 Year — $500", callback_data=f"forex_pay:{forex_type}:12m")],
+        [InlineKeyboardButton("⬅️ Back", callback_data=back_target)],
+    ]
+    await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
+
 async def show_synthetic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    url = await get_link(context, "synthetic")
     await send_or_edit(
         update,
-        "📊 <b>PAWNS SYNTHETIC TRADING</b>\n\n"
-        "Access PAWNS synthetic-trading onboarding.\n\n"
-        "<b>Service Fee:</b> $20\n\n"
-        "The configured provider and exact service deliverable should be reviewed before payment.",
-        InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("💳 Pay $20 / Start Registration", callback_data="register:synthetic")],
-                [configurable_link_button("🔗 Synthetic Trading Link", url, "synthetic")],
-                [InlineKeyboardButton("⬅️ Back", callback_data="menu")],
-            ]
-        ),
+        "📊 <b>PAWNS SYNTHETIC TRADING</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Synthetic trading onboarding is currently undergoing maintenance and will be available soon.</i>\n\n"
+        "Stay tuned to our official announcements!",
+        back_keyboard("menu"),
     )
 
 
@@ -961,34 +1401,90 @@ async def show_referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_id = update.effective_user.id
     bot_username = context.application.bot_data.get("bot_username") or context.bot.username
     referral_link = f"https://t.me/{bot_username}?start=ref_{user_doc['referral_id']}"
-    referred_count = await db.users.count_documents({"referred_by": user_id})
 
-    verified_pipeline = [
+    # 1. Total Attributed Referrals (free + paid)
+    total_attributed = await db.users.count_documents({"referred_by": user_id})
+
+    # 2. Qualified Paid Referrals (only users whose payments have been verified)
+    paid_count = await db.users.count_documents({
+        "referred_by": user_id,
+        "is_paid_referral": True,
+    })
+
+    # 3. Dynamic Tier Calculation for Trading Subscriptions
+    current_rate, current_min, next_min = get_trading_referral_tier(paid_count)
+    if next_min is not None:
+        needed = next_min - paid_count
+        next_rate = next((r for m, r in TRADING_REFERRAL_TIERS if m == next_min), Decimal("25"))
+        progress_text = f"<b>Next Tier:</b> {needed} more paid ref{'s' if needed != 1 else ''} to unlock <b>{next_rate}%</b>"
+    else:
+        progress_text = "<b>Next Tier:</b> 🏆 Max Tier Reached (25%)!"
+
+    # 4. Aggregated Earnings per Program
+    trading_earnings = Decimal("0")
+    investment_earnings = Decimal("0")
+    async for row in await db.commissions.aggregate([
         {"$match": {"referrer_telegram_id": user_id, "status": "verified"}},
-        {"$group": {"_id": "$currency", "total": {"$sum": {"$toDecimal": "$referrer_share"}}}},
-    ]
-    earnings: list[str] = []
-    async for row in await db.commissions.aggregate(verified_pipeline):
-        earnings.append(f"{row['_id']} {row['total']}")
-    earnings_text = ", ".join(earnings) if earnings else "No verified earnings yet"
+        {"$group": {"_id": "$program", "total": {"$sum": {"$toDecimal": "$referrer_share"}}}},
+    ]):
+        prog = row.get("_id")
+        tot = Decimal(str(row.get("total", "0")))
+        if prog == "private_investment":
+            investment_earnings += tot
+        else:
+            trading_earnings += tot
+    total_earnings = trading_earnings + investment_earnings
 
-    settings = get_settings(context)
-    await send_or_edit(
-        update,
-        "🤝 <b>PAWNS REFERRAL PROGRAM</b>\n\n"
-        f"Earn <b>{settings.commission_percent}% of eligible affiliate commission</b> from qualifying referrals, "
-        "subject to the referral terms. This is not a percentage of a customer's investment or trading volume.\n\n"
-        f"<b>Your Referral ID:</b> <code>{html.escape(user_doc['referral_id'])}</code>\n"
-        f"<b>Your Referral Link:</b> {html.escape(referral_link)}\n"
-        f"<b>Attributed Referrals:</b> {referred_count}\n"
-        f"<b>Verified Earnings:</b> {html.escape(earnings_text)}",
-        InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("📄 Referral Terms", callback_data="terms")],
-                [InlineKeyboardButton("⬅️ Back", callback_data="menu")],
-            ]
-        ),
+    text = (
+        "🤝 <b>PAWNS PARTNER & REFERRAL PROGRAM</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Earn lifetime commissions by introducing traders and investors to PAWNS.\n\n"
+        "🔗 <b>Your Referral Details:</b>\n"
+        f"• <b>Referral ID:</b> <code>{html.escape(user_doc['referral_id'])}</code>\n"
+        f"• <b>Referral Link:</b> <code>{html.escape(referral_link)}</code>\n\n"
+        "👥 <b>Your Referral Network:</b>\n"
+        f"• <b>Total Referrals:</b> {total_attributed}\n"
+        f"• <b>Qualified Paid Referrals:</b> <b>{paid_count}</b>\n\n"
+        "⚡ <b>Trading Subscriptions (Crypto Futures & Forex):</b>\n"
+        f"• <b>Current Commission Rate:</b> <b>{current_rate}%</b> of service fees\n"
+        f"• {progress_text}\n\n"
+        "♟️ <b>Private Investment:</b>\n"
+        f"• <b>Commission Rate:</b> <b>{INVESTMENT_REFERRAL_RATE}%</b> of referred investor profits\n\n"
+        "💰 <b>Your Verified Earnings:</b>\n"
+        f"• <b>Trading Subscriptions:</b> ${trading_earnings:.2f} USDT\n"
+        f"• <b>Private Investment Profits:</b> ${investment_earnings:.2f} USDT\n"
+        f"• <b>Total Verified Earnings:</b> <b>${total_earnings:.2f} USDT</b>\n\n"
+        "<i>Note: Commission rates and tier upgrades apply strictly to verified paid referrals.</i>"
     )
+    buttons = [
+        [InlineKeyboardButton("📋 Copy Referral Link", copy_text=CopyTextButton(text=referral_link))],
+        [InlineKeyboardButton("📊 View Tier Schedule", callback_data="referral:tiers")],
+        [InlineKeyboardButton("📄 Referral Terms", callback_data="terms")],
+        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="menu")],
+    ]
+    await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
+
+async def show_referral_tiers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "📊 <b>PAWNS REFERRAL TIER SCHEDULE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚡ <b>Trading Subscriptions (Crypto Futures & Forex):</b>\n"
+        "Commissions are paid as a percentage of service fees paid by your referrals:\n\n"
+        "• <b>Base Tier (0 – 4 paid refs):</b> <b>7%</b>\n"
+        "• <b>Tier 1 (5 – 14 paid refs):</b> <b>10%</b>\n"
+        "• <b>Tier 2 (15 – 24 paid refs):</b> <b>12%</b>\n"
+        "• <b>Tier 3 (25 – 49 paid refs):</b> <b>15%</b>\n"
+        "• <b>Tier 4 (50 – 99 paid refs):</b> <b>20%</b>\n"
+        "• <b>Tier 5 (100+ paid refs):</b> <b>25%</b>\n\n"
+        "♟️ <b>Private Investment Program:</b>\n"
+        "• <b>Flat Base Rate:</b> <b>10%</b> of realized referral profit.\n\n"
+        "⚠️ <i>Tier qualifications and payouts strictly apply to unique paid referrals whose payments are confirmed and verified.</i>"
+    )
+    buttons = [
+        [InlineKeyboardButton("⬅️ Back to Referral Hub", callback_data="referral")],
+    ]
+    await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
 
 
 async def not_configured(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1006,14 +1502,21 @@ async def route_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         "service:private": show_private,
         "service:plans": show_plans,
         "service:crypto": show_crypto,
+        "crypto:fees": show_crypto_fees,
+        "crypto:bingx_start": show_crypto_bingx,
+        "crypto:standard_start": show_crypto_standard,
         "service:forex": show_forex,
         "service:forex_live": show_forex_live,
         "service:forex_prop": show_forex_prop,
+        "forex_live:durations": lambda u, c: show_forex_durations(u, c, "live"),
+        "forex_prop:durations": lambda u, c: show_forex_durations(u, c, "prop"),
         "service:synthetic": show_synthetic,
         "about": show_about,
         "support": show_support,
         "terms": show_terms,
         "referral": show_referral,
+        "referral:tiers": show_referral_tiers,
+        "inv:report": investor_report_request,
     }
     handler = routes.get(data)
     if handler:
@@ -1035,11 +1538,75 @@ async def registration_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return ConversationHandler.END
 
-    context.user_data["registration"] = {"service": service}
+    context.user_data["registration"] = {
+        "service": service,
+        "track": "standard",
+        "duration_key": "1m",
+        "duration": "1 month",
+    }
     await query.edit_message_text(
         f"<b>{html.escape(SERVICE_NAMES[service])}</b>\n\n"
-        "Please enter your full legal name.\n\n"
+        "Please enter your name:\n\n"
         "Send /cancel at any time to stop this registration.",
+        parse_mode=ParseMode.HTML,
+    )
+    return FULL_NAME
+
+
+async def crypto_pay_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await ensure_user(update, context)
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    track = parts[1]  # "bingx" or "standard"
+    duration = parts[2]  # "1m", "3m", "6m", "12m"
+
+    fee = CRYPTO_BINGX_FEES[duration] if track == "bingx" else CRYPTO_STANDARD_FEES[duration]
+    duration_label = DURATION_LABELS.get(duration, duration)
+
+    context.user_data["registration"] = {
+        "service": "crypto",
+        "track": track,
+        "duration_key": duration,
+        "duration": duration_label,
+        "fee": str(fee),
+    }
+    track_title = "BingX VIP" if track == "bingx" else "Standard VIP"
+    await query.edit_message_text(
+        f"<b>PAWNS Crypto Futures — {track_title}</b>\n"
+        f"Duration: <b>{duration_label}</b> (${fee} USD)\n\n"
+        "Please enter your name to start registration:\n\n"
+        "Send /cancel at any time to abort.",
+        parse_mode=ParseMode.HTML,
+    )
+    return FULL_NAME
+
+
+async def forex_pay_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await ensure_user(update, context)
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    forex_type = parts[1]  # "live" or "prop"
+    duration = parts[2]  # "1m", "3m", "6m", "12m"
+
+    service = "forex_live" if forex_type == "live" else "forex_prop"
+    fee = FOREX_FEES[duration]
+    duration_label = DURATION_LABELS.get(duration, duration)
+
+    context.user_data["registration"] = {
+        "service": service,
+        "track": forex_type,
+        "duration_key": duration,
+        "duration": duration_label,
+        "fee": str(fee),
+    }
+    svc_name = SERVICE_NAMES[service]
+    await query.edit_message_text(
+        f"<b>{html.escape(svc_name)}</b>\n"
+        f"Duration: <b>{duration_label}</b> (${fee} USD)\n\n"
+        "Please enter your name to start registration:\n\n"
+        "Send /cancel at any time to abort.",
         parse_mode=ParseMode.HTML,
     )
     return FULL_NAME
@@ -1047,8 +1614,8 @@ async def registration_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def receive_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     name = clip(update.effective_message.text or "", 120)
-    if len(name.split()) < 2 or any(char.isdigit() for char in name):
-        await update.effective_message.reply_text("Please enter your full legal name using at least two words.")
+    if len(name) < 2 or any(char.isdigit() for char in name):
+        await update.effective_message.reply_text("Please enter a valid name (at least 2 letters, no numbers).")
         return FULL_NAME
 
     registration = context.user_data["registration"]
@@ -1064,16 +1631,8 @@ async def receive_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return INVESTMENT_AMOUNT
 
-    # For trading services, display payment details directly
-    payment_info = await get_service_payment_info(context, service)
-    registration["payment_info"] = payment_info
-    text, keyboard = render_payment_screen(payment_info)
-    await update.effective_message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
-    )
-    return PAYMENT_DETAILS
+    # For trading services, prompt payment method directly
+    return await prompt_payment_method(update, context)
 
 
 async def receive_investment_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1102,8 +1661,11 @@ async def receive_investment_amount(update: Update, context: ContextTypes.DEFAUL
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("Higher Risk", callback_data="risk:high")],
-                [InlineKeyboardButton("Lower Risk", callback_data="risk:low")],
+                [
+                    InlineKeyboardButton("🔥 Higher Risk", callback_data="risk:high"),
+                    InlineKeyboardButton("🛡️ Lower Risk", callback_data="risk:low"),
+                ],
+                [InlineKeyboardButton("ℹ️ What's Involved? / Risk Overview", callback_data="risk:info")],
             ]
         ),
     )
@@ -1128,6 +1690,56 @@ async def select_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return DURATION
 
 
+async def show_risk_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    info_text = (
+        "ℹ️ <b>UNDERSTANDING RISK CATEGORIES</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🔥 <b>Higher-Risk Objective:</b>\n"
+        "• Targets higher yield multipliers (e.g. 50% for 2m up to 400% for 12m).\n"
+        "• Uses aggressive trading models and higher market exposure.\n"
+        "• Carries higher volatility and increased potential drawdown.\n\n"
+        "🛡️ <b>Lower-Risk Objective:</b>\n"
+        "• Targets balanced capital preservation and steady yield (e.g. 20% for 2m up to 200% for 12m).\n"
+        "• Employs strict risk controls, lower position sizing, and tight stop-loss rules.\n"
+        "• Best suited for conservative participants prioritizing downside protection.\n\n"
+        "⚠️ <i>All figures represent proposed return targets, not guaranteed outcomes. Invest only what you are comfortable allocating.</i>"
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔥 Select Higher Risk", callback_data="risk:high"),
+                InlineKeyboardButton("🛡️ Select Lower Risk", callback_data="risk:low"),
+            ],
+            [InlineKeyboardButton("⬅️ Back to Risk Selection", callback_data="risk:back")],
+        ]
+    )
+    await query.edit_message_text(info_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    return RISK_CATEGORY
+
+
+async def back_to_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    reg = context.user_data.get("registration", {})
+    amount = reg.get("investment_amount", "0")
+    await query.edit_message_text(
+        f"Selected amount: <b>${amount}</b>\n\nChoose a risk category:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🔥 Higher Risk", callback_data="risk:high"),
+                    InlineKeyboardButton("🛡️ Lower Risk", callback_data="risk:low"),
+                ],
+                [InlineKeyboardButton("ℹ️ What's Involved? / Risk Overview", callback_data="risk:info")],
+            ]
+        ),
+    )
+    return RISK_CATEGORY
+
+
 async def select_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -1136,6 +1748,7 @@ async def select_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     risk = registration["risk_category"]
     if duration not in INVESTMENT_PLANS[risk]:
         return DURATION
+    registration["duration_key"] = duration
     registration["duration"] = DURATION_LABELS[duration]
     registration["proposed_return"] = INVESTMENT_PLANS[risk][duration]
     return await ask_for_consent(update, context)
@@ -1144,8 +1757,8 @@ async def select_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 def registration_summary(registration: dict[str, Any]) -> str:
     service = registration["service"]
     lines = [
-        f"<b>Service:</b> {html.escape(SERVICE_NAMES[service])}",
-        f"<b>Full name:</b> {html.escape(registration['full_name'])}",
+        f"<b>Service:</b> {html.escape(SERVICE_NAMES.get(service, service))}",
+        f"<b>Name:</b> {html.escape(registration['full_name'])}",
     ]
     if service == "private":
         lines.extend(
@@ -1201,18 +1814,73 @@ async def receive_consent(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     registration = context.user_data["registration"]
     registration["consent_at"] = utc_now()
+    return await prompt_payment_method(update, context)
+
+
+async def prompt_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    registration = context.user_data.get("registration", {})
+    service = registration.get("service", "private")
+    dur_key = registration.get("duration_key", "1m")
+    track = registration.get("track", "standard")
+    inv_amt = registration.get("investment_amount")
+
     payment_info = await get_service_payment_info(
         context,
-        registration["service"],
-        investment_amount=registration.get("investment_amount"),
+        service,
+        investment_amount=inv_amt,
+        duration=dur_key,
+        track=track,
     )
     registration["payment_info"] = payment_info
-    text, keyboard = render_payment_screen(payment_info)
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
-    )
+    dur_label = registration.get("duration", DURATION_LABELS.get(dur_key, ""))
+
+    # Naira bank transfer is strictly only available for Forex payments
+    if service in ("forex_live", "forex_prop"):
+        text, keyboard = render_payment_method_screen(
+            payment_info["service_name"],
+            payment_info["amount"],
+            duration_label=dur_label,
+        )
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        else:
+            await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return SELECT_PAYMENT_METHOD
+    else:
+        # Private investment and crypto futures are strictly Crypto (USDT)
+        registration["payment_method"] = "crypto"
+        text, keyboard = render_crypto_payment_screen(payment_info)
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        else:
+            await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return PAYMENT_DETAILS
+
+
+async def receive_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    method = query.data.split(":", 1)[1]
+
+    registration = context.user_data.get("registration", {})
+    service = registration.get("service")
+
+    if method == "naira" and service not in ("forex_live", "forex_prop"):
+        await query.answer("Naira bank transfer is only available for Forex subscriptions.", show_alert=True)
+        return SELECT_PAYMENT_METHOD
+
+    registration["payment_method"] = method
+    payment_info = registration.get("payment_info", {})
+    settings = get_settings(context)
+    db = get_db(context)
+
+    if method == "crypto":
+        text, keyboard = render_crypto_payment_screen(payment_info)
+    else:
+        usd_rate = Decimal(await db.get_setting("usd_ngn_rate", str(settings.usd_ngn_rate)))
+        text, keyboard = render_naira_payment_screen(payment_info, settings, usd_rate)
+
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     return PAYMENT_DETAILS
 
 
@@ -1242,7 +1910,123 @@ async def receive_payment_button(update: Update, context: ContextTypes.DEFAULT_T
         )
         return AWAIT_TXID
 
+    if data == "pay:confirm_naira":
+        registration = context.user_data.get("registration", {})
+        service = registration.get("service")
+        if service not in ("forex_live", "forex_prop"):
+            await query.answer("Naira bank transfer is only available for Forex subscriptions.", show_alert=True)
+            return PAYMENT_DETAILS
+        await query.edit_message_text(
+            "📤 <b>Upload Payment Receipt</b>\n\n"
+            "Please upload your bank transfer payment receipt screenshot as a <b>photo</b> or <b>document</b>.\n\n"
+            "Our finance desk will verify your payment manually once uploaded.",
+            parse_mode=ParseMode.HTML,
+        )
+        return AWAIT_NAIRA_RECEIPT
+
     return PAYMENT_DETAILS
+
+
+async def receive_naira_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    photo = message.photo[-1] if message.photo else None
+    document = message.document if message.document else None
+
+    if not photo and not document:
+        await message.reply_text(
+            "⚠️ Please upload your payment receipt as an image or document screenshot."
+        )
+        return AWAIT_NAIRA_RECEIPT
+
+    registration = context.user_data.get("registration")
+    if not registration or "payment_info" not in registration:
+        await message.reply_text("Session expired. Please restart registration from /menu.")
+        return ConversationHandler.END
+
+    if registration.get("service") not in ("forex_live", "forex_prop"):
+        await message.reply_text("⚠️ Naira payments are strictly accepted only for Forex services.")
+        return ConversationHandler.END
+
+    payment_info = registration["payment_info"]
+    file_id = photo.file_id if photo else document.file_id
+    file_type = "photo" if photo else "document"
+
+    db = get_db(context)
+    user = update.effective_user
+    reference = make_reference()
+    now = utc_now()
+    user_doc = await db.users.find_one({"telegram_id": user.id})
+
+    settings = get_settings(context)
+    usd_rate = Decimal(await db.get_setting("usd_ngn_rate", str(settings.usd_ngn_rate)))
+    usd_amount = Decimal(payment_info["amount"])
+    ngn_amount = int(usd_amount * usd_rate)
+
+    submission = {
+        "reference": reference,
+        "telegram_id": user.id,
+        "telegram_username": user.username,
+        "full_name": registration.get("full_name", user.full_name),
+        "service": payment_info["service"],
+        "service_name": payment_info["service_name"],
+        "duration_key": registration.get("duration_key", "1m"),
+        "track": registration.get("track", "standard"),
+        "amount": str(usd_amount),
+        "currency": "USD",
+        "payment_method": "naira",
+        "ngn_amount": ngn_amount,
+        "usd_ngn_rate": str(usd_rate),
+        "receipt_file_id": file_id,
+        "receipt_file_type": file_type,
+        "selected_plan": {
+            key: registration[key]
+            for key in ("investment_amount", "risk_category", "duration", "proposed_return")
+            if key in registration
+        },
+        "payment_status": "PENDING",
+        "admin_verification_status": {
+            "decision": "Pending",
+            "reviewed_by": None,
+            "reviewed_at": None,
+            "note": "",
+        },
+        "onboarding_status": "Pending",
+        "created_at": now,
+        "updated_at": now,
+        "referred_by": user_doc.get("referred_by") if user_doc else None,
+    }
+
+    await db.submissions.insert_one(submission)
+    await db.users.update_one(
+        {"telegram_id": user.id},
+        {
+            "$set": {
+                "full_name": registration["full_name"],
+                "selected_service": payment_info["service"],
+                "last_submission_reference": reference,
+                "updated_at": now,
+            }
+        },
+    )
+    await db.audit.insert_one(
+        {"action": "naira_payment_submitted", "reference": reference, "telegram_id": user.id, "created_at": now}
+    )
+
+    user_reply = (
+        "⏳ <b>Payment Status: PENDING</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Reference:</b> <code>{reference}</code>\n"
+        f"<b>Service:</b> {html.escape(payment_info['service_name'])}\n"
+        f"<b>Amount:</b> ₦{ngn_amount:,} (${usd_amount} USD)\n"
+        f"<b>Payment Method:</b> Naira Bank Transfer\n\n"
+        "Your payment receipt screenshot has been received and forwarded to our finance desk.\n"
+        "An administrator will verify your payment and activate your service shortly."
+    )
+    await message.reply_text(user_reply, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
+
+    await notify_admins_naira(context, submission)
+    context.user_data.pop("registration", None)
+    return ConversationHandler.END
 
 
 async def receive_txid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1282,7 +2066,6 @@ async def receive_txid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     normalized = normalize_txid(raw_txid, network)
     db = get_db(context)
 
-    # Replay protection check
     dup = await db.submissions.find_one(
         {"txid": normalized, "payment_status": {"$in": ["PENDING", "VERIFIED ✅", "Verified"]}}
     )
@@ -1294,7 +2077,6 @@ async def receive_txid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         )
         return AWAIT_TXID
 
-    # Run on-chain verification
     chain_result = await verify_on_chain(
         txid=normalized,
         network=network,
@@ -1314,11 +2096,14 @@ async def receive_txid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         "full_name": registration.get("full_name", user.full_name),
         "service": payment_info["service"],
         "service_name": payment_info["service_name"],
+        "duration_key": registration.get("duration_key", "1m"),
+        "track": registration.get("track", "standard"),
         "amount": str(payment_info["amount"]),
         "currency": payment_info["currency"],
         "network": network,
         "wallet_address": payment_info["wallet"],
         "txid": normalized,
+        "payment_method": "crypto",
         "explorer_url": chain_result.explorer_url,
         "chain_verification": {
             "status": chain_result.status,
@@ -1394,6 +2179,22 @@ def admin_submission_text(submission: dict[str, Any]) -> str:
     for key, value in plan.items():
         plan_lines.append(f"• {key.replace('_', ' ').title()}: {html.escape(str(value))}")
 
+    if submission.get("payment_method") == "naira":
+        return (
+            "🆕 <b>PAWNS NAIRA PAYMENT VERIFICATION REQUIRED</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Reference:</b> <code>{html.escape(submission['reference'])}</code>\n"
+            f"<b>User:</b> {html.escape(submission.get('full_name', 'Unknown'))}\n"
+            f"<b>Telegram:</b> {html.escape(username_text)}\n"
+            f"<b>Telegram ID:</b> <code>{submission['telegram_id']}</code>\n"
+            f"<b>Service:</b> {html.escape(submission.get('service_name', submission.get('service', '')))}\n"
+            f"<b>Amount:</b> ₦{submission.get('ngn_amount', 0):,} (${html.escape(str(submission.get('amount', '')))} USD)\n"
+            f"<b>Payment Method:</b> Naira Bank Transfer\n"
+            + ("\n".join(plan_lines) + "\n" if plan_lines else "")
+            + f"<b>Payment Status:</b> <b>{html.escape(submission.get('payment_status', 'PENDING'))}</b>\n"
+            f"<b>Onboarding Status:</b> {html.escape(submission.get('onboarding_status', 'Pending'))}"
+        )
+
     chain_ver = submission.get("chain_verification", {})
     chain_status = chain_ver.get("status", "unknown")
     chain_details = chain_ver.get("details", "No check recorded")
@@ -1447,6 +2248,65 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, submission: dict[str
             LOGGER.error("Could not notify admin %s: %s", admin_id, exc)
 
 
+async def notify_admins_naira(context: ContextTypes.DEFAULT_TYPE, submission: dict[str, Any]) -> None:
+    settings = get_settings(context)
+    reference = submission["reference"]
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"admin:verify:{reference}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"admin:reject:{reference}"),
+            ],
+            [
+                InlineKeyboardButton("ℹ️ Request Info", callback_data=f"admin:reqinfo:{reference}"),
+            ],
+        ]
+    )
+    caption = (
+        "🆕 <b>PAWNS NAIRA PAYMENT VERIFICATION REQUIRED</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Reference:</b> <code>{html.escape(reference)}</code>\n"
+        f"<b>User:</b> {html.escape(submission.get('full_name', 'Unknown'))}\n"
+        f"<b>Telegram:</b> @{html.escape(submission.get('telegram_username', 'Not set'))}\n"
+        f"<b>Telegram ID:</b> <code>{submission['telegram_id']}</code>\n"
+        f"<b>Service:</b> {html.escape(submission.get('service_name', ''))}\n"
+        f"<b>Amount:</b> ₦{submission.get('ngn_amount', 0):,} (${submission.get('amount', '')} USD)\n"
+        f"<b>Payment Method:</b> Naira Bank Transfer\n"
+        f"<b>Status:</b> <b>PENDING</b>\n\n"
+        "<i>Payment receipt attached:</i>"
+    )
+    file_id = submission.get("receipt_file_id")
+    file_type = submission.get("receipt_file_type", "photo")
+
+    for admin_id in settings.admin_chat_ids:
+        try:
+            if file_id and file_type == "photo":
+                await context.bot.send_photo(
+                    chat_id=admin_id,
+                    photo=file_id,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                )
+            elif file_id and file_type == "document":
+                await context.bot.send_document(
+                    chat_id=admin_id,
+                    document=file_id,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                )
+        except (Forbidden, BadRequest, TelegramError) as exc:
+            LOGGER.error("Could not notify admin %s of Naira payment: %s", admin_id, exc)
+
+
 async def cancel_registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("registration", None)
     context.user_data.pop("onboarding", None)
@@ -1456,6 +2316,116 @@ async def cancel_registration(update: Update, context: ContextTypes.DEFAULT_TYPE
         main_menu_keyboard(),
     )
     return ConversationHandler.END
+
+
+async def process_referral_on_payment_verified(
+    context: ContextTypes.DEFAULT_TYPE,
+    submission: dict[str, Any],
+) -> dict[str, Any] | None:
+    db = get_db(context)
+    user_id = submission.get("telegram_id")
+    if not user_id:
+        return None
+
+    user_doc = await db.users.find_one({"telegram_id": user_id})
+    if not user_doc:
+        return None
+
+    referrer_id = user_doc.get("referred_by")
+    if not referrer_id:
+        return None
+
+    referrer = await db.users.find_one({"telegram_id": referrer_id})
+    if not referrer:
+        return None
+
+    now = utc_now()
+    service = submission.get("service", "")
+    reference = submission.get("reference", "")
+
+    # Mark user as paid referral if not already marked
+    is_first_paid = not user_doc.get("is_paid_referral")
+    if is_first_paid:
+        await db.users.update_one(
+            {"telegram_id": user_id},
+            {"$set": {"is_paid_referral": True, "first_paid_at": now, "updated_at": now}},
+        )
+
+    # Count referrer's unique qualified paid referrals
+    paid_count = await db.users.count_documents({
+        "referred_by": referrer_id,
+        "is_paid_referral": True,
+    })
+
+    if service in ("crypto", "forex_live", "forex_prop", "synthetic"):
+        rate, current_min, next_min = get_trading_referral_tier(paid_count)
+        try:
+            payment_amount = Decimal(str(submission.get("amount", "0")))
+        except (InvalidOperation, ValueError):
+            payment_amount = Decimal("0")
+
+        if payment_amount > 0:
+            share = (payment_amount * rate / Decimal("100")).quantize(Decimal("0.01"))
+            com_ref = make_reference("COM")
+            service_name = submission.get("service_name", SERVICE_NAMES.get(service, service))
+            com_doc = {
+                "reference": com_ref,
+                "referrer_telegram_id": referrer_id,
+                "referred_telegram_id": user_id,
+                "program": "trading_subscriptions",
+                "service": service,
+                "service_name": service_name,
+                "payment_reference": reference,
+                "payment_amount": str(payment_amount),
+                "commission_rate": str(rate),
+                "paid_referrals_at_time": paid_count,
+                "referrer_share": str(share),
+                "currency": "USDT",
+                "status": "verified",
+                "created_at": now,
+            }
+            await db.commissions.insert_one(com_doc)
+
+            try:
+                next_tier_text = f" ({next_min - paid_count} more paid referrals to reach next tier)" if next_min else " (Top tier achieved!)"
+                await context.bot.send_message(
+                    chat_id=referrer_id,
+                    text=(
+                        "🎉 <b>Referral Commission Earned!</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"A referred trader subscribed to <b>{html.escape(service_name)}</b>!\n\n"
+                        f"• <b>Payment:</b> ${payment_amount} USD\n"
+                        f"• <b>Your Tier Rate:</b> <b>{rate}%</b> ({paid_count} paid referrals){next_tier_text}\n"
+                        f"• <b>Earned:</b> <b>+{share} USDT</b>\n"
+                        f"• <b>Ref:</b> <code>{com_ref}</code>\n\n"
+                        "Check your balance with /referral."
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as exc:
+                LOGGER.warning("Could not send referral commission alert to %s: %s", referrer_id, exc)
+            return com_doc
+
+    elif service == "private":
+        try:
+            inv_amt = submission.get("amount", "0")
+            await context.bot.send_message(
+                chat_id=referrer_id,
+                text=(
+                    "♟️ <b>Private Investment Referral Active!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"An investor you referred funded an investment of <b>${html.escape(str(inv_amt))} USDT</b>!\n\n"
+                    "• <b>Program:</b> Private Investment\n"
+                    f"• <b>Commission Structure:</b> {INVESTMENT_REFERRAL_RATE}% of realized referral profits\n"
+                    f"• <b>Total Paid Referrals:</b> {paid_count}\n\n"
+                    "Your profit commission will be credited as returns are realized."
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            LOGGER.warning("Could not send private investment referral alert to %s: %s", referrer_id, exc)
+
+    return None
 
 
 async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1553,29 +2523,80 @@ async def admin_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     service_name = submission.get("service_name", SERVICE_NAMES.get(service, service))
 
     if action == "verify":
-        onboarding_prompts = {
-            "crypto": "Please tap below to submit your <b>BingX UID</b> to complete your trading setup.",
-            "forex_live": "Please tap below to submit your <b>Broker Name and Live Account ID</b>.",
-            "forex_prop": "Please tap below to submit your <b>Prop Firm Name and Account/Challenge ID</b>.",
-            "synthetic": "Please tap below to submit your <b>Synthetic Trading Account ID</b>.",
-            "private": "Please tap below to confirm your <b>Investment Agreement & Onboarding Details</b>.",
-        }
-        prompt_text = onboarding_prompts.get(service, "Please tap below to submit your onboarding details.")
-        user_message = (
-            f"🎉 <b>Payment Status: VERIFIED ✅</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Your payment of <b>${html.escape(str(submission.get('amount', '')))} "
-            f"{html.escape(submission.get('currency', ''))}</b> for <b>{html.escape(service_name)}</b> "
-            f"(Ref: <code>{reference}</code>) has been confirmed!\n\n"
-            f"👉 <b>Next Step — Service Onboarding:</b>\n"
-            f"{prompt_text}"
-        )
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("📝 Complete Onboarding", callback_data=f"onboard_start:{reference}")],
-                [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")],
-            ]
-        )
+        if service == "private":
+            user_message = (
+                f"🎉 <b>Payment Status: VERIFIED ✅</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Your investment payment of <b>${html.escape(str(submission.get('amount', '')))} "
+                f"{html.escape(submission.get('currency', ''))}</b> for <b>{html.escape(service_name)}</b> "
+                f"(Ref: <code>{reference}</code>) has been confirmed!\n\n"
+                "👉 <b>Next Step — Complete Investor Onboarding:</b>\n"
+                "Please tap below to confirm your investor details and receive your portal access."
+            )
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("📝 Complete Onboarding", callback_data=f"onboard_start:{reference}")],
+                    [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")],
+                ]
+            )
+        else:
+            duration_key = submission.get("duration_key", "1m")
+            days = DURATION_DAYS.get(duration_key, 30)
+            expires_at = now + timedelta(days=days)
+
+            sub_doc = {
+                "telegram_id": submission["telegram_id"],
+                "telegram_username": submission.get("telegram_username"),
+                "reference": reference,
+                "service": service,
+                "service_name": service_name,
+                "track": submission.get("track", "standard"),
+                "duration_key": duration_key,
+                "duration_days": days,
+                "start_date": now,
+                "expires_at": expires_at,
+                "status": "active",
+                "expiry_warning_sent": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+            await db.subscriptions.insert_one(sub_doc)
+            await db.users.update_one(
+                {"telegram_id": submission["telegram_id"]},
+                {
+                    "$set": {
+                        f"subscriptions.{service}": {
+                            "status": "active",
+                            "expires_at": expires_at,
+                            "reference": reference,
+                            "duration_key": duration_key,
+                        },
+                        "updated_at": now,
+                    }
+                },
+            )
+
+            channel_url = await get_link(context, "pawns_channel")
+            channel_buttons = []
+            if is_http_url(channel_url):
+                channel_buttons.append([InlineKeyboardButton("🚀 Join VIP Trading Channel", url=channel_url)])
+            channel_buttons.append([InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")])
+
+            dur_label = DURATION_LABELS.get(duration_key, duration_key)
+            user_message = (
+                f"🎉 <b>Payment Status: VERIFIED ✅</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Your payment of <b>${html.escape(str(submission.get('amount', '')))} "
+                f"{html.escape(submission.get('currency', ''))}</b> for <b>{html.escape(service_name)}</b> "
+                f"(Ref: <code>{reference}</code>) has been confirmed!\n\n"
+                f"<b>Subscription Period:</b> {html.escape(dur_label)} ({days} days)\n"
+                f"<b>Expires On:</b> {expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                "👉 <b>Join the VIP Channel:</b>\n"
+                "Use the button below to join the private VIP channel and receive signals."
+            )
+            keyboard = InlineKeyboardMarkup(channel_buttons)
+
+        await process_referral_on_payment_verified(context, submission)
     else:
         support_url = await get_link(context, "support")
         user_message = (
@@ -1617,7 +2638,7 @@ async def onboard_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "forex_live": "Enter the broker name and your non-sensitive account identifier:",
         "forex_prop": "Enter the prop-firm name and your non-sensitive account identifier:",
         "synthetic": "Enter the provider name and your non-sensitive account identifier:",
-        "private": "Confirm your legal name and agreement acceptance:",
+        "private": "Confirm your name or any onboarding notes to activate your portfolio:",
     }
     context.user_data["onboarding"] = {"reference": ref, "service": service}
     await query.edit_message_text(
@@ -1663,13 +2684,51 @@ async def receive_onboarding_input(update: Update, context: ContextTypes.DEFAULT
         await message.reply_text("Could not update onboarding record. Please contact support.")
         return ConversationHandler.END
 
-    await message.reply_text(
-        f"✅ <b>Onboarding Complete!</b>\n\n"
-        f"Your onboarding details for <b>{html.escape(updated.get('service_name', ''))}</b> (Ref: <code>{ref}</code>) have been recorded.\n\n"
-        "Our team will finalize your account setup. Thank you for choosing PAWNS!",
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_keyboard(),
-    )
+    if updated.get("service") == "private":
+        await db.users.update_one(
+            {"telegram_id": update.effective_user.id},
+            {
+                "$set": {
+                    "investor_status": "active",
+                    "investor_details": {
+                        "full_name": updated.get("full_name"),
+                        "reference": ref,
+                        "investment_amount": updated.get("selected_plan", {}).get("investment_amount") or updated.get("amount"),
+                        "risk_category": updated.get("selected_plan", {}).get("risk_category"),
+                        "duration": updated.get("selected_plan", {}).get("duration"),
+                        "proposed_return": updated.get("selected_plan", {}).get("proposed_return"),
+                        "onboarded_at": now,
+                    },
+                    "updated_at": now,
+                }
+            },
+        )
+        pawns_channel = await get_link(context, "pawns_channel")
+        portal_bot = await get_link(context, "investor_portal_bot")
+        links_buttons = []
+        if is_http_url(pawns_channel):
+            links_buttons.append([InlineKeyboardButton("📢 PAWNS Community Channel", url=pawns_channel)])
+        if is_http_url(portal_bot):
+            links_buttons.append([InlineKeyboardButton("🤖 PAWNS Investor Portal Bot", url=portal_bot)])
+        links_buttons.append([InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")])
+
+        await message.reply_text(
+            "🎉 <b>Onboarding Complete & Portfolio Activated!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your private investment portfolio for <b>Ref: <code>{ref}</code></b> is now officially active!\n\n"
+            "🔗 <b>Access Your Channels & Portals:</b>\n"
+            "Join our official investor community and access your dedicated investor bot below.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(links_buttons),
+        )
+    else:
+        await message.reply_text(
+            f"✅ <b>Onboarding Complete!</b>\n\n"
+            f"Your onboarding details for <b>{html.escape(updated.get('service_name', ''))}</b> (Ref: <code>{ref}</code>) have been recorded.\n\n"
+            "Our team will finalize your account setup. Thank you for choosing PAWNS!",
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(),
+        )
 
     for admin_id in get_settings(context).admin_chat_ids:
         try:
@@ -1696,12 +2755,14 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     db = get_db(context)
     users = await db.users.count_documents({})
+    paid_referrals = await db.users.count_documents({"is_paid_referral": True})
     pending = await db.submissions.count_documents({"payment_status": {"$in": ["PENDING", "Under Review"]}})
     verified = await db.submissions.count_documents({"payment_status": {"$in": ["VERIFIED ✅", "Verified"]}})
     rejected = await db.submissions.count_documents({"payment_status": {"$in": ["REJECTED", "Rejected"]}})
     await update.effective_message.reply_text(
         "<b>PAWNS ADMIN STATS</b>\n\n"
         f"Registered users: {users}\n"
+        f"Verified paid referrals: {paid_referrals}\n"
         f"Pending payments: {pending}\n"
         f"Verified payments: {verified}\n"
         f"Rejected payments: {rejected}",
@@ -1726,12 +2787,18 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     min_invest = await db.get_setting("minimum_investment", str(settings.minimum_investment))
     inst_inv = await db.get_setting("payment_instructions_investment", settings.payment_instructions_investment)
     inst_trd = await db.get_setting("payment_instructions_trading", settings.payment_instructions_trading)
+    usd_rate = await db.get_setting("usd_ngn_rate", str(settings.usd_ngn_rate))
 
     text = (
         "⚙️ <b>PAWNS ADMIN CONFIGURATION</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Investment Wallet ({inv_net}):</b>\n<code>{inv_wallet}</code>\n\n"
         f"<b>Trading Services Wallet ({trd_net}):</b>\n<code>{trd_wallet}</code>\n\n"
+        "<b>Naira Bank Details (Forex Only):</b>\n"
+        f"• Bank: {html.escape(settings.naira_bank_name)}\n"
+        f"• Account Number: <code>{html.escape(settings.naira_account_number)}</code>\n"
+        f"• Account Name: {html.escape(settings.naira_account_name)}\n"
+        f"• USD/NGN Rate: <b>₦{usd_rate}</b> / $1 USD\n\n"
         "<b>Service Fees:</b>\n"
         f"• Crypto Futures: ${fee_crypto}\n"
         f"• Forex Live: ${fee_forex_live}\n"
@@ -1741,12 +2808,20 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "<b>Payment Instructions:</b>\n"
         f"• Investment: {inst_inv}\n"
         f"• Trading: {inst_trd}\n\n"
+        "<b>Partner Brokers:</b>\n"
+        f"• {html.escape(settings.broker_1_name)} | {html.escape(settings.broker_2_name)} | {html.escape(settings.broker_3_name)}\n\n"
+        "<b>Partner Prop Firms:</b>\n"
+        f"• {html.escape(settings.prop_1_name)} | {html.escape(settings.prop_2_name)} | {html.escape(settings.prop_3_name)}\n\n"
         "<b>Admin Commands:</b>\n"
         "• <code>/setwallet &lt;investment|trading&gt; &lt;address&gt;</code>\n"
         "• <code>/setfee &lt;crypto|forex_live|forex_prop|synthetic&gt; &lt;amount&gt;</code>\n"
         "• <code>/setmininvest &lt;amount&gt;</code>\n"
         "• <code>/setnetwork &lt;investment|trading&gt; &lt;network&gt;</code>\n"
         "• <code>/setinstructions &lt;investment|trading&gt; &lt;text&gt;</code>\n"
+        "• <code>/setnairarate &lt;rate&gt;</code>\n"
+        "• <code>/addcommission &lt;referrer_id&gt; &lt;amount&gt; &lt;currency&gt; [note]</code>\n"
+        "• <code>/addinvestmentprofit &lt;investor_id&gt; &lt;profit_amount&gt; [note]</code>\n"
+        "• <code>/checkexpiry</code>\n"
         "• <code>/audit</code>"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -1908,6 +2983,849 @@ async def admin_set_instructions(update: Update, context: ContextTypes.DEFAULT_T
     await update.effective_message.reply_text(f"✅ Updated {target} payment instructions.")
 
 
+async def admin_set_naira_rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = get_settings(context)
+    admin_id = update.effective_user.id if update.effective_user else None
+    if not is_admin(admin_id, settings):
+        return
+
+    if not context.args or len(context.args) != 1:
+        await update.effective_message.reply_text(
+            "Usage: /setnairarate &lt;rate&gt;\nExample: <code>/setnairarate 1450</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    rate_str = context.args[0].strip().replace(",", "")
+    try:
+        rate = Decimal(rate_str)
+        if rate <= 0:
+            raise ValueError
+    except (InvalidOperation, ValueError):
+        await update.effective_message.reply_text("Rate must be a positive number.")
+        return
+
+    db = get_db(context)
+    audit_rec = await db.set_setting("usd_ngn_rate", str(rate), admin_id)
+    await update.effective_message.reply_text(
+        f"✅ Updated <b>USD to NGN Exchange Rate</b> to <b>₦{rate}</b> (was ₦{audit_rec.get('old_value', '')}).\n"
+        "New payments will immediately use this exchange rate.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def run_subscription_expiry_check(application: Application) -> tuple[int, int]:
+    db: Database = application.bot_data["db"]
+    settings: Settings = application.bot_data["settings"]
+    now = utc_now()
+    four_days_from_now = now + timedelta(days=4)
+    warned_count = 0
+    expired_count = 0
+
+    # 1. Subscriptions expiring within 4 days (not yet warned)
+    near_cursor = db.subscriptions.find({
+        "status": "active",
+        "expiry_warning_sent": {"$ne": True},
+        "expires_at": {"$lte": four_days_from_now, "$gt": now},
+    })
+    async for sub in near_cursor:
+        delta = sub["expires_at"] - now
+        days_left = max(1, delta.days)
+        time_str = f"{days_left} day(s)" if days_left > 1 else f"{max(1, delta.seconds // 3600)} hour(s)"
+        svc_name = sub.get("service_name", sub.get("service", "Trading Service"))
+
+        sub_id = sub.get("_id")
+        if sub_id:
+            await db.subscriptions.update_one(
+                {"_id": sub_id},
+                {"$set": {"expiry_warning_sent": True, "updated_at": now}},
+            )
+        else:
+            await db.subscriptions.update_one(
+                {"reference": sub.get("reference")},
+                {"$set": {"expiry_warning_sent": True, "updated_at": now}},
+            )
+        warned_count += 1
+
+        svc = sub.get("service")
+        if svc == "crypto":
+            track = sub.get("track", "standard")
+            renew_cb = f"cf_pay:{track}:1m"
+        elif svc in {"forex_live", "forex_prop"}:
+            forex_type = "live" if svc == "forex_live" else "prop"
+            renew_cb = f"forex_pay:{forex_type}:1m"
+        else:
+            renew_cb = "menu"
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔄 Renew Subscription", callback_data=renew_cb)],
+                [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")],
+            ]
+        )
+        user_msg = (
+            "⚠️ <b>SUBSCRIPTION EXPIRING SOON</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your access to <b>{html.escape(svc_name)}</b> will expire in approximately <b>{time_str}</b> "
+            f"({sub['expires_at'].strftime('%Y-%m-%d %H:%M UTC')}).\n\n"
+            "To maintain uninterrupted access to PAWNS VIP signals and channels, please renew your subscription."
+        )
+        try:
+            await application.bot.send_message(
+                chat_id=sub["telegram_id"],
+                text=user_msg,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+        except TelegramError as exc:
+            LOGGER.warning("Could not send expiry warning to user %s: %s", sub["telegram_id"], exc)
+
+        admin_msg = (
+            "⚠️ <b>UPCOMING SUBSCRIPTION EXPIRY NOTICE</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>User:</b> @{html.escape(sub.get('telegram_username') or 'N/A')}\n"
+            f"<b>Telegram ID:</b> <code>{sub['telegram_id']}</code>\n"
+            f"<b>Service:</b> {html.escape(svc_name)}\n"
+            f"<b>Expires in:</b> {time_str} ({sub['expires_at'].strftime('%Y-%m-%d %H:%M UTC')})\n\n"
+            "<i>Reminder: Access will need to be removed from VIP channel if not renewed upon expiration.</i>"
+        )
+        for admin_id in settings.admin_chat_ids:
+            try:
+                await application.bot.send_message(
+                    chat_id=admin_id,
+                    text=admin_msg,
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramError:
+                pass
+
+    # 2. Subscriptions expired (expires_at <= now, marked active)
+    expired_cursor = db.subscriptions.find({
+        "status": "active",
+        "expires_at": {"$lte": now},
+    })
+    async for sub in expired_cursor:
+        svc_name = sub.get("service_name", sub.get("service", "Trading Service"))
+        svc = sub.get("service")
+        sub_id = sub.get("_id")
+        if sub_id:
+            await db.subscriptions.update_one(
+                {"_id": sub_id},
+                {"$set": {"status": "expired", "updated_at": now}},
+            )
+        else:
+            await db.subscriptions.update_one(
+                {"reference": sub.get("reference")},
+                {"$set": {"status": "expired", "updated_at": now}},
+            )
+
+        if svc:
+            await db.users.update_one(
+                {"telegram_id": sub["telegram_id"]},
+                {"$set": {f"subscriptions.{svc}.status": "expired", "updated_at": now}},
+            )
+        expired_count += 1
+
+        if svc == "crypto":
+            track = sub.get("track", "standard")
+            renew_cb = f"cf_pay:{track}:1m"
+        elif svc in {"forex_live", "forex_prop"}:
+            forex_type = "live" if svc == "forex_live" else "prop"
+            renew_cb = f"forex_pay:{forex_type}:1m"
+        else:
+            renew_cb = "menu"
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔄 Renew Subscription", callback_data=renew_cb)],
+                [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")],
+            ]
+        )
+        user_msg = (
+            "🔴 <b>SUBSCRIPTION EXPIRED</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your access to <b>{html.escape(svc_name)}</b> has expired.\n\n"
+            "To regain access to PAWNS VIP signals and channels, please renew your subscription below."
+        )
+        try:
+            await application.bot.send_message(
+                chat_id=sub["telegram_id"],
+                text=user_msg,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+        except TelegramError as exc:
+            LOGGER.warning("Could not send expired notice to user %s: %s", sub["telegram_id"], exc)
+
+        admin_msg = (
+            "🚨 <b>SUBSCRIPTION EXPIRED — ACTION REQUIRED</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>User:</b> @{html.escape(sub.get('telegram_username') or 'N/A')}\n"
+            f"<b>Telegram ID:</b> <code>{sub['telegram_id']}</code>\n"
+            f"<b>Service:</b> {html.escape(svc_name)}\n"
+            f"<b>Expired at:</b> {sub['expires_at'].strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            "⚠️ <b>Reminder to Admin:</b> Please remove this user from the private VIP channel / group if they do not renew."
+        )
+        for admin_id in settings.admin_chat_ids:
+            try:
+                await application.bot.send_message(
+                    chat_id=admin_id,
+                    text=admin_msg,
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramError:
+                pass
+
+    return warned_count, expired_count
+
+
+async def subscription_expiry_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    LOGGER.info("Running scheduled 4-day subscription expiry check...")
+    try:
+        warned, expired = await run_subscription_expiry_check(context.application)
+        LOGGER.info("Subscription expiry check complete. Warnings: %d, Expired: %d", warned, expired)
+    except Exception as exc:
+        LOGGER.exception("Error during subscription expiry check: %s", exc)
+
+
+async def admin_check_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = get_settings(context)
+    if not is_admin(update.effective_user.id if update.effective_user else None, settings):
+        return
+    await update.effective_message.reply_text("⏳ Running subscription expiry check...")
+    warned, expired = await run_subscription_expiry_check(context.application)
+    await update.effective_message.reply_text(
+        f"✅ <b>Expiry Check Completed</b>\n\n"
+        f"• Expiry warnings sent: <b>{warned}</b>\n"
+        f"• Subscriptions marked expired: <b>{expired}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# --- BingX UID Flow ---
+async def bingx_uid_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🆔 <b>Submit Your BingX UID</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Please enter your numeric BingX User ID (UID):\n\n"
+        "<i>(You can find your UID in your BingX Profile)</i>\n\n"
+        "Send /cancel to return to the menu.",
+        parse_mode=ParseMode.HTML,
+    )
+    return BINGX_UID_INPUT
+
+
+async def receive_bingx_uid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    raw_uid = (message.text or "").strip()
+    if FORBIDDEN_SECRET_RE.search(raw_uid):
+        await message.reply_text("⚠️ Do not submit passwords or private keys. Please submit only your BingX UID.")
+        return BINGX_UID_INPUT
+
+    if not raw_uid.isalnum() or len(raw_uid) < 4 or len(raw_uid) > 30:
+        await message.reply_text("❌ Please enter a valid BingX UID (numbers/letters, 4-30 characters).")
+        return BINGX_UID_INPUT
+
+    user = update.effective_user
+    db = get_db(context)
+    now = utc_now()
+
+    record = {
+        "telegram_id": user.id,
+        "telegram_username": user.username,
+        "full_name": user.full_name,
+        "uid": raw_uid,
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.bingx_verifications.insert_one(record)
+
+    await message.reply_text(
+        "⏳ <b>BingX UID Submitted</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Your BingX UID <code>{html.escape(raw_uid)}</code> has been submitted to the verification desk.\n\n"
+        "Once verified by an administrator, you will receive a notification and unlock discounted subscription rates.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_keyboard(),
+    )
+
+    settings = get_settings(context)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"admin:bingx_approve:{user.id}:{raw_uid}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"admin:bingx_reject:{user.id}:{raw_uid}"),
+            ]
+        ]
+    )
+    admin_text = (
+        "🆔 <b>NEW BINGX UID VERIFICATION REQUEST</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>User:</b> {html.escape(user.full_name)} (@{html.escape(user.username or 'N/A')})\n"
+        f"<b>Telegram ID:</b> <code>{user.id}</code>\n"
+        f"<b>BingX UID:</b> <code>{html.escape(raw_uid)}</code>"
+    )
+    for admin_id in settings.admin_chat_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=admin_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+        except TelegramError as exc:
+            LOGGER.error("Could not notify admin %s of BingX UID: %s", admin_id, exc)
+
+    return ConversationHandler.END
+
+
+async def admin_bingx_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    settings = get_settings(context)
+    admin_user = update.effective_user
+    if not is_admin(admin_user.id if admin_user else None, settings):
+        await query.answer("You are not authorised to perform this action.", show_alert=True)
+        return
+
+    parts = query.data.split(":", 3)
+    action = parts[1]
+    target_user_id = int(parts[2])
+    raw_uid = parts[3]
+    db = get_db(context)
+    now = utc_now()
+
+    if action == "bingx_approve":
+        await db.bingx_verifications.update_one(
+            {"telegram_id": target_user_id, "uid": raw_uid},
+            {"$set": {"status": "approved", "reviewed_by": admin_user.id, "updated_at": now}},
+        )
+        await db.users.update_one(
+            {"telegram_id": target_user_id},
+            {"$set": {"bingx_verified": True, "bingx_uid": raw_uid, "updated_at": now}},
+        )
+        await query.answer("BingX UID approved.")
+        try:
+            await query.edit_message_text(
+                query.message.text_html + f"\n\n<b>Decision:</b> APPROVED ✅ by {html.escape(admin_user.full_name)}",
+                parse_mode=ParseMode.HTML,
+            )
+        except BadRequest:
+            pass
+
+        buttons = [
+            [InlineKeyboardButton("1 Month — $40", callback_data="cf_pay:bingx:1m")],
+            [InlineKeyboardButton("3 Months — $90", callback_data="cf_pay:bingx:3m")],
+            [InlineKeyboardButton("6 Months — $200", callback_data="cf_pay:bingx:6m")],
+            [InlineKeyboardButton("1 Year — $300", callback_data="cf_pay:bingx:12m")],
+            [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")],
+        ]
+        user_msg = (
+            "🎉 <b>BingX UID Verified!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your BingX UID <code>{html.escape(raw_uid)}</code> has been verified.\n\n"
+            "You now qualify for discounted PAWNS Crypto Futures subscriptions! Choose your duration below to proceed to payment:"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=user_msg,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except TelegramError as exc:
+            LOGGER.warning("Could not send BingX approval to user %s: %s", target_user_id, exc)
+    else:
+        await db.bingx_verifications.update_one(
+            {"telegram_id": target_user_id, "uid": raw_uid},
+            {"$set": {"status": "rejected", "reviewed_by": admin_user.id, "updated_at": now}},
+        )
+        await query.answer("BingX UID rejected.")
+        try:
+            await query.edit_message_text(
+                query.message.text_html + f"\n\n<b>Decision:</b> REJECTED ❌ by {html.escape(admin_user.full_name)}",
+                parse_mode=ParseMode.HTML,
+            )
+        except BadRequest:
+            pass
+
+        support_url = await get_link(context, "support")
+        buttons = []
+        if is_http_url(support_url):
+            buttons.append([InlineKeyboardButton("🛟 Contact Support", url=support_url)])
+        buttons.append([InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")])
+        user_msg = (
+            "❌ <b>BingX UID Verification Failed</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your BingX UID <code>{html.escape(raw_uid)}</code> could not be verified under the PAWNS affiliate desk.\n\n"
+            "Please ensure you registered using our official partner link, or contact support for assistance."
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=user_msg,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except TelegramError as exc:
+            LOGGER.warning("Could not send BingX rejection to user %s: %s", target_user_id, exc)
+
+
+# --- Investor Hub Handlers ---
+async def investor_report_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    db = get_db(context)
+    now = utc_now()
+
+    ref = make_reference("REP")
+    record = {
+        "reference": ref,
+        "telegram_id": user.id,
+        "telegram_username": user.username,
+        "full_name": user.full_name,
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.reports.insert_one(record)
+
+    await query.edit_message_text(
+        "📊 <b>Portfolio Report Request Submitted</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Reference:</b> <code>{ref}</code>\n\n"
+        "Your request for an official portfolio progress report has been transmitted to our portfolio desk.\n"
+        "An administrator will compile and dispatch your updated report directly via this chat.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard("service:private"),
+    )
+
+    settings = get_settings(context)
+    admin_keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✍️ Write Report", callback_data=f"admin:write_report:{user.id}:{ref}")],
+        ]
+    )
+    admin_text = (
+        "📊 <b>NEW INVESTOR REPORT REQUEST</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Investor:</b> {html.escape(user.full_name)} (@{html.escape(user.username or 'N/A')})\n"
+        f"<b>Telegram ID:</b> <code>{user.id}</code>\n"
+        f"<b>Reference:</b> <code>{ref}</code>\n\n"
+        "Click below to write and send a progress report to this investor."
+    )
+    for admin_id in settings.admin_chat_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=admin_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=admin_keyboard,
+            )
+        except TelegramError as exc:
+            LOGGER.error("Could not notify admin %s of report request: %s", admin_id, exc)
+
+
+async def admin_write_report_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    settings = get_settings(context)
+    admin_user = update.effective_user
+    if not is_admin(admin_user.id if admin_user else None, settings):
+        await query.answer("You are not authorised.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+    parts = query.data.split(":", 3)
+    target_user_id = int(parts[2])
+    ref = parts[3]
+
+    context.user_data["admin_report"] = {"target_user_id": target_user_id, "reference": ref}
+    await query.edit_message_text(
+        query.message.text_html + f"\n\n✍️ <i>Admin {html.escape(admin_user.full_name)} is preparing report...</i>\n\n"
+        "<b>Please send the report text below:</b>\n"
+        "<i>(Your next text message will be forwarded directly to the investor as their portfolio report)</i>\n\n"
+        "Send /cancel to abort.",
+        parse_mode=ParseMode.HTML,
+    )
+    return ADMIN_REPORT_INPUT
+
+
+async def receive_admin_report_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    report_text = (message.text or "").strip()
+    data = context.user_data.get("admin_report")
+    if not data:
+        await message.reply_text("Session expired. Please click 'Write Report' again.")
+        return ConversationHandler.END
+
+    target_user_id = data["target_user_id"]
+    ref = data["reference"]
+    db = get_db(context)
+    now = utc_now()
+
+    await db.reports.update_one(
+        {"reference": ref},
+        {
+            "$set": {
+                "status": "delivered",
+                "report_text": report_text,
+                "sent_by": update.effective_user.id,
+                "delivered_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+
+    user_msg = (
+        "📊 <b>PAWNS INVESTMENT PORTFOLIO REPORT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Report Ref:</b> <code>{ref}</code>\n"
+        f"<b>Date:</b> {now.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        f"{html.escape(report_text)}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Generated by PAWNS Portfolio Management. Contact support if you have questions.</i>"
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=user_msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(),
+        )
+        await message.reply_text("✅ Report has been successfully delivered to the investor.")
+    except TelegramError as exc:
+        LOGGER.warning("Could not deliver report to user %s: %s", target_user_id, exc)
+        await message.reply_text(f"⚠️ Could not deliver report to user: {exc}")
+
+    context.user_data.pop("admin_report", None)
+    return ConversationHandler.END
+
+
+# --- Investor Withdrawal Flow ---
+async def investor_withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "💸 <b>Request Capital / Profit Withdrawal</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Please enter your <b>TRC20 USDT Destination Wallet Address</b> and the <b>Amount (in USD)</b> you wish to withdraw.\n\n"
+        "<b>Format:</b> <code>&lt;Wallet Address&gt; &lt;Amount&gt;</code>\n"
+        "<b>Example:</b> <code>TGJTYkkXpPg8Mi2jYLWFxx4YWSoVTY3tUs 500</code>\n\n"
+        "⚠️ <i>Only TRC20 / TRON USDT addresses are supported for private investments.</i>\n\n"
+        "Send /cancel to return to the menu.",
+        parse_mode=ParseMode.HTML,
+    )
+    return INVESTOR_WITHDRAW_INPUT
+
+
+async def receive_investor_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    text = (message.text or "").strip()
+    parts = text.split()
+    if len(parts) < 2:
+        await message.reply_text(
+            "⚠️ Please enter both your wallet address and withdrawal amount separated by a space.\n"
+            "Example: <code>TGJTYkkXpPg8Mi2jYLWFxx4YWSoVTY3tUs 500</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return INVESTOR_WITHDRAW_INPUT
+
+    wallet = parts[0]
+    amount_str = parts[1].replace("$", "").replace(",", "")
+
+    if not validate_wallet_format(wallet, "TRC20 / TRON"):
+        await message.reply_text(
+            "❌ Invalid TRC20 wallet address. TRC20 addresses start with 'T' and are exactly 34 characters long.\n"
+            "Please check and re-enter:"
+        )
+        return INVESTOR_WITHDRAW_INPUT
+
+    try:
+        amt = Decimal(amount_str)
+        if amt <= 0:
+            raise ValueError
+    except (InvalidOperation, ValueError):
+        await message.reply_text("❌ Please enter a valid positive withdrawal amount.")
+        return INVESTOR_WITHDRAW_INPUT
+
+    user = update.effective_user
+    db = get_db(context)
+    now = utc_now()
+    ref = make_reference("WTH")
+
+    record = {
+        "reference": ref,
+        "telegram_id": user.id,
+        "telegram_username": user.username,
+        "full_name": user.full_name,
+        "destination_wallet": wallet,
+        "amount": str(amt),
+        "currency": "USDT",
+        "network": "TRC20 / TRON",
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.withdrawals.insert_one(record)
+
+    await message.reply_text(
+        "⏳ <b>Withdrawal Request Logged</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Reference:</b> <code>{ref}</code>\n"
+        f"<b>Amount:</b> ${amt} USDT\n"
+        f"<b>Destination Wallet:</b> <code>{wallet}</code>\n\n"
+        "Your withdrawal request has been submitted to the treasury desk for verification and disbursement.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_keyboard(),
+    )
+
+    settings = get_settings(context)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Mark Paid", callback_data=f"admin:withdraw_approve:{ref}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"admin:withdraw_reject:{ref}"),
+            ]
+        ]
+    )
+    admin_text = (
+        "💸 <b>NEW WITHDRAWAL REQUEST</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Reference:</b> <code>{ref}</code>\n"
+        f"<b>Investor:</b> {html.escape(user.full_name)} (@{html.escape(user.username or 'N/A')})\n"
+        f"<b>Telegram ID:</b> <code>{user.id}</code>\n"
+        f"<b>Amount:</b> ${amt} USDT\n"
+        f"<b>Destination:</b> <code>{wallet}</code>\n"
+        f"<b>Network:</b> TRC20 / TRON"
+    )
+    for admin_id in settings.admin_chat_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=admin_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+        except TelegramError as exc:
+            LOGGER.error("Could not notify admin %s of withdrawal request: %s", admin_id, exc)
+
+    return ConversationHandler.END
+
+
+async def admin_withdraw_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    settings = get_settings(context)
+    admin_user = update.effective_user
+    if not is_admin(admin_user.id if admin_user else None, settings):
+        await query.answer("You are not authorised.", show_alert=True)
+        return
+
+    _, action, ref = query.data.split(":", 2)
+    db = get_db(context)
+    now = utc_now()
+    doc = await db.withdrawals.find_one({"reference": ref})
+    if not doc:
+        await query.answer("Withdrawal record not found.", show_alert=True)
+        return
+
+    is_approve = action == "withdraw_approve"
+    status_str = "completed" if is_approve else "rejected"
+
+    await db.withdrawals.update_one(
+        {"reference": ref},
+        {"$set": {"status": status_str, "reviewed_by": admin_user.id, "updated_at": now}},
+    )
+    decision_label = "PROCESSED & PAID ✅" if is_approve else "REJECTED ❌"
+    await query.answer(f"Withdrawal marked as {status_str}.")
+    try:
+        await query.edit_message_text(
+            query.message.text_html + f"\n\n<b>Decision:</b> {decision_label} by {html.escape(admin_user.full_name)}",
+            parse_mode=ParseMode.HTML,
+        )
+    except BadRequest:
+        pass
+
+    target_id = doc["telegram_id"]
+    if is_approve:
+        user_msg = (
+            "✅ <b>Withdrawal Processed</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your withdrawal of <b>${doc['amount']} USDT</b> (Ref: <code>{ref}</code>) has been successfully disbursed to your wallet:\n"
+            f"<code>{doc['destination_wallet']}</code>\n\n"
+            "Thank you for investing with PAWNS!"
+        )
+    else:
+        user_msg = (
+            "❌ <b>Withdrawal Request Rejected</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Your withdrawal request (Ref: <code>{ref}</code>) was rejected by the treasury desk.\n\n"
+            "Please contact PAWNS support for further clarification."
+        )
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=user_msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(),
+        )
+    except TelegramError as exc:
+        LOGGER.warning("Could not notify user %s of withdrawal decision: %s", target_id, exc)
+
+
+# --- Investor Termination Flow ---
+async def investor_terminate_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⏩ Proceed Without Reason", callback_data="term:skip_reason")],
+            [InlineKeyboardButton("❌ Abort / Main Menu", callback_data="menu")],
+        ]
+    )
+    await query.edit_message_text(
+        "📄 <b>Termination of Investment Contract</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Are you sure you wish to terminate your PAWNS private investment contract?\n\n"
+        "Please type a reason or feedback below, or tap <b>Proceed Without Reason</b> if you do not wish to provide one.\n\n"
+        "Send /cancel to return to menu.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+    return INVESTOR_TERMINATE_INPUT
+
+
+async def receive_termination_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await _handle_termination_request(update, context, reason="No reason provided")
+    return ConversationHandler.END
+
+
+async def receive_termination_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    reason = clip(update.effective_message.text or "", 500)
+    await _handle_termination_request(update, context, reason=reason)
+    return ConversationHandler.END
+
+
+async def _handle_termination_request(update: Update, context: ContextTypes.DEFAULT_TYPE, reason: str) -> None:
+    user = update.effective_user
+    db = get_db(context)
+    now = utc_now()
+    ref = make_reference("TRM")
+
+    record = {
+        "reference": ref,
+        "telegram_id": user.id,
+        "telegram_username": user.username,
+        "full_name": user.full_name,
+        "reason": reason,
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.terminations.insert_one(record)
+
+    confirm_msg = (
+        "⏳ <b>Termination Request Logged</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Reference:</b> <code>{ref}</code>\n"
+        f"<b>Reason:</b> {html.escape(reason)}\n\n"
+        "Your contract termination request has been sent to our administrative desk. "
+        "An administrator will review and confirm the contract closure."
+    )
+    if update.callback_query:
+        await update.callback_query.edit_message_text(confirm_msg, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
+    else:
+        await update.effective_message.reply_text(confirm_msg, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
+
+    settings = get_settings(context)
+    admin_keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🛑 Confirm Termination", callback_data=f"admin:confirm_terminate:{user.id}:{ref}")],
+        ]
+    )
+    admin_text = (
+        "🛑 <b>INVESTMENT CONTRACT TERMINATION REQUEST</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Reference:</b> <code>{ref}</code>\n"
+        f"<b>Investor:</b> {html.escape(user.full_name)} (@{html.escape(user.username or 'N/A')})\n"
+        f"<b>Telegram ID:</b> <code>{user.id}</code>\n"
+        f"<b>Reason:</b> {html.escape(reason)}\n\n"
+        "Confirming termination will set the user's status to <b>INACTIVE</b> in the database (preserving all records)."
+    )
+    for admin_id in settings.admin_chat_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=admin_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=admin_keyboard,
+            )
+        except TelegramError as exc:
+            LOGGER.error("Could not notify admin %s of termination request: %s", admin_id, exc)
+
+
+async def admin_confirm_terminate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    settings = get_settings(context)
+    admin_user = update.effective_user
+    if not is_admin(admin_user.id if admin_user else None, settings):
+        await query.answer("You are not authorised.", show_alert=True)
+        return
+
+    parts = query.data.split(":", 3)
+    target_user_id = int(parts[2])
+    ref = parts[3]
+    db = get_db(context)
+    now = utc_now()
+
+    await db.users.update_one(
+        {"telegram_id": target_user_id},
+        {
+            "$set": {
+                "investor_status": "inactive",
+                "termination_reference": ref,
+                "terminated_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+    await db.terminations.update_one(
+        {"reference": ref},
+        {"$set": {"status": "confirmed", "reviewed_by": admin_user.id, "confirmed_at": now, "updated_at": now}},
+    )
+
+    await query.answer("Termination confirmed.")
+    try:
+        await query.edit_message_text(
+            query.message.text_html + f"\n\n<b>Decision:</b> TERMINATED 🛑 by {html.escape(admin_user.full_name)} (Status: inactive)",
+            parse_mode=ParseMode.HTML,
+        )
+    except BadRequest:
+        pass
+
+    user_msg = (
+        "ℹ️ <b>Contract Successfully Terminated</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Your PAWNS private investment contract (Ref: <code>{ref}</code>) has been officially terminated.\n\n"
+        "Your account status is now set to <b>inactive</b>. All records and historical statements remain preserved.\n\n"
+        "If you have questions regarding final capital settlements, please contact PAWNS Support."
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=user_msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(),
+        )
+    except TelegramError as exc:
+        LOGGER.warning("Could not notify user %s of contract termination: %s", target_user_id, exc)
+
+
 async def admin_audit_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings(context)
     if not is_admin(update.effective_user.id if update.effective_user else None, settings):
@@ -1984,6 +3902,7 @@ async def admin_add_commission(update: Update, context: ContextTypes.DEFAULT_TYP
             "affiliate_commission": str(affiliate_commission),
             "commission_percent": str(settings.commission_percent),
             "referrer_share": str(share),
+            "program": "trading_subscriptions",
             "currency": context.args[2].upper()[:10],
             "note": clip(" ".join(context.args[3:]), 300),
             "status": "verified",
@@ -1993,6 +3912,90 @@ async def admin_add_commission(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     await update.effective_message.reply_text(
         f"Recorded verified referral earning: {context.args[2].upper()} {share}\nReference: {event_reference}"
+    )
+
+
+async def admin_add_investment_profit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = get_settings(context)
+    if not is_admin(update.effective_user.id if update.effective_user else None, settings):
+        return
+    if not context.args or len(context.args) < 2:
+        await update.effective_message.reply_text(
+            "Usage: /addinvestmentprofit &lt;investor_telegram_id&gt; &lt;profit_amount&gt; [note]\n"
+            "Example: <code>/addinvestmentprofit 123456789 250 Month 1 trading profit</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        investor_id = int(context.args[0])
+        profit_amount = Decimal(context.args[1])
+    except (ValueError, InvalidOperation):
+        await update.effective_message.reply_text("Investor ID must be an integer and profit amount must be numeric.")
+        return
+
+    if profit_amount <= 0:
+        await update.effective_message.reply_text("Profit amount must be greater than zero.")
+        return
+
+    db = get_db(context)
+    investor = await db.users.find_one({"telegram_id": investor_id})
+    if not investor:
+        await update.effective_message.reply_text("Investor account not found.")
+        return
+
+    referrer_id = investor.get("referred_by")
+    if not referrer_id:
+        await update.effective_message.reply_text("This investor was not referred by anyone. No referral commission recorded.")
+        return
+
+    referrer = await db.users.find_one({"telegram_id": referrer_id})
+    if not referrer:
+        await update.effective_message.reply_text("Referrer account not found.")
+        return
+
+    share = (profit_amount * INVESTMENT_REFERRAL_RATE / Decimal("100")).quantize(Decimal("0.01"))
+    event_reference = make_reference("COM")
+    now = utc_now()
+    note = clip(" ".join(context.args[2:]), 300) if len(context.args) > 2 else ""
+
+    com_doc = {
+        "reference": event_reference,
+        "referrer_telegram_id": referrer_id,
+        "referred_telegram_id": investor_id,
+        "program": "private_investment",
+        "service": "private",
+        "service_name": "PAWNS Private Investment",
+        "profit_amount": str(profit_amount),
+        "commission_rate": str(INVESTMENT_REFERRAL_RATE),
+        "referrer_share": str(share),
+        "currency": "USDT",
+        "note": note,
+        "status": "verified",
+        "created_by": update.effective_user.id,
+        "created_at": now,
+    }
+    await db.commissions.insert_one(com_doc)
+
+    try:
+        await context.bot.send_message(
+            chat_id=referrer_id,
+            text=(
+                "🎉 <b>Private Investment Profit Commission Credited!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Your referred investor earned profits on their PAWNS Private Investment portfolio.\n\n"
+                f"• <b>Realized Profit:</b> ${profit_amount} USDT\n"
+                f"• <b>Referral Rate:</b> <b>{INVESTMENT_REFERRAL_RATE}%</b>\n"
+                f"• <b>Your Commission:</b> <b>+{share} USDT</b>\n"
+                f"• <b>Ref:</b> <code>{event_reference}</code>\n\n"
+                "Check your balance with /referral."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        LOGGER.warning("Could not send investment profit commission alert to %s: %s", referrer_id, exc)
+
+    await update.effective_message.reply_text(
+        f"Credited 10% referral commission (+{share} USDT) to referrer {referrer_id} for investor {investor_id}.\nReference: {event_reference}"
     )
 
 
@@ -2048,7 +4051,7 @@ def build_application(settings: Settings) -> Application:
     application = (
         ApplicationBuilder()
         .token(settings.bot_token)
-        .concurrent_updates(False)
+        .concurrent_updates(True)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
@@ -2059,19 +4062,32 @@ def build_application(settings: Settings) -> Application:
     registration = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(registration_start, pattern=r"^register:(private|crypto|forex_live|forex_prop|synthetic)$"),
+            CallbackQueryHandler(crypto_pay_start, pattern=r"^cf_pay:(bingx|standard):(1m|3m|6m|12m)$"),
+            CallbackQueryHandler(forex_pay_start, pattern=r"^forex_pay:(live|prop):(1m|3m|6m|12m)$"),
             CallbackQueryHandler(onboard_start, pattern=r"^onboard_start:BM-\d{8}-[A-F0-9]{8}$"),
         ],
         states={
             FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_full_name)],
             INVESTMENT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_investment_amount)],
-            RISK_CATEGORY: [CallbackQueryHandler(select_risk, pattern=r"^risk:(high|low)$")],
+            RISK_CATEGORY: [
+                CallbackQueryHandler(select_risk, pattern=r"^risk:(high|low)$"),
+                CallbackQueryHandler(show_risk_info, pattern=r"^risk:info$"),
+                CallbackQueryHandler(back_to_risk, pattern=r"^risk:back$"),
+            ],
             DURATION: [CallbackQueryHandler(select_duration, pattern=r"^duration:(2m|3m|6m|12m)$")],
             CONSENT: [CallbackQueryHandler(receive_consent, pattern=r"^consent:(yes|no)$")],
-            PAYMENT_DETAILS: [CallbackQueryHandler(receive_payment_button, pattern=r"^pay:(confirm|cancel)$")],
+            SELECT_PAYMENT_METHOD: [CallbackQueryHandler(receive_payment_method, pattern=r"^paymethod:(crypto|naira)$")],
+            PAYMENT_DETAILS: [CallbackQueryHandler(receive_payment_button, pattern=r"^pay:(confirm|confirm_naira|cancel)$")],
             AWAIT_TXID: [
                 MessageHandler(
                     filters.ALL & ~filters.COMMAND,
                     receive_txid,
+                )
+            ],
+            AWAIT_NAIRA_RECEIPT: [
+                MessageHandler(
+                    filters.ALL & ~filters.COMMAND,
+                    receive_naira_receipt,
                 )
             ],
             ONBOARDING_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_onboarding_input)],
@@ -2083,6 +4099,69 @@ def build_application(settings: Settings) -> Application:
         name="registration",
     )
     application.add_handler(registration)
+
+    bingx_uid_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(bingx_uid_start, pattern=r"^bingx:enter_uid$"),
+        ],
+        states={
+            BINGX_UID_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_bingx_uid)],
+        },
+        fallbacks=[
+            CommandHandler(["cancel", "menu", "start", "stop"], cancel_registration),
+        ],
+        allow_reentry=True,
+        name="bingx_uid",
+    )
+    application.add_handler(bingx_uid_conv)
+
+    investor_withdraw_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(investor_withdraw_start, pattern=r"^inv:withdraw$"),
+        ],
+        states={
+            INVESTOR_WITHDRAW_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_investor_withdraw)],
+        },
+        fallbacks=[
+            CommandHandler(["cancel", "menu", "start", "stop"], cancel_registration),
+        ],
+        allow_reentry=True,
+        name="investor_withdraw",
+    )
+    application.add_handler(investor_withdraw_conv)
+
+    investor_terminate_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(investor_terminate_start, pattern=r"^inv:terminate$"),
+        ],
+        states={
+            INVESTOR_TERMINATE_INPUT: [
+                CallbackQueryHandler(receive_termination_skip, pattern=r"^term:skip_reason$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_termination_reason),
+            ],
+        },
+        fallbacks=[
+            CommandHandler(["cancel", "menu", "start", "stop"], cancel_registration),
+        ],
+        allow_reentry=True,
+        name="investor_terminate",
+    )
+    application.add_handler(investor_terminate_conv)
+
+    admin_report_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(admin_write_report_start, pattern=r"^admin:write_report:\d+:[A-Z0-9-]+$"),
+        ],
+        states={
+            ADMIN_REPORT_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_admin_report_text)],
+        },
+        fallbacks=[
+            CommandHandler(["cancel", "menu", "start", "stop"], cancel_registration),
+        ],
+        allow_reentry=True,
+        name="admin_report",
+    )
+    application.add_handler(admin_report_conv)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler(["menu", "services", "cancel", "stop"], show_main_menu))
@@ -2102,9 +4181,12 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("setmininvest", admin_set_min_invest))
     application.add_handler(CommandHandler("setnetwork", admin_set_network))
     application.add_handler(CommandHandler("setinstructions", admin_set_instructions))
+    application.add_handler(CommandHandler("setnairarate", admin_set_naira_rate))
+    application.add_handler(CommandHandler("checkexpiry", admin_check_expiry))
     application.add_handler(CommandHandler(["audit", "auditlog"], admin_audit_log))
     application.add_handler(CommandHandler("setlink", admin_set_link))
     application.add_handler(CommandHandler("addcommission", admin_add_commission))
+    application.add_handler(CommandHandler("addinvestmentprofit", admin_add_investment_profit))
 
     application.add_handler(
         CallbackQueryHandler(
@@ -2112,15 +4194,43 @@ def build_application(settings: Settings) -> Application:
             pattern=r"^admin:(verify|reject|reqinfo):BM-\d{8}-[A-F0-9]{8}$",
         )
     )
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_bingx_review,
+            pattern=r"^admin:bingx_(approve|reject):\d+:.+$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_withdraw_review,
+            pattern=r"^admin:(withdraw_approve|withdraw_reject):WTH-\d{8}-[A-F0-9]{8}$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_confirm_terminate,
+            pattern=r"^admin:confirm_terminate:\d+:TRM-\d{8}-[A-F0-9]{8}$",
+        )
+    )
     application.add_handler(CallbackQueryHandler(not_configured, pattern=r"^not_configured:"))
     application.add_handler(
         CallbackQueryHandler(
             route_menu_callback,
-            pattern=r"^(menu|about|support|terms|referral|service:(private|plans|crypto|forex|forex_live|forex_prop|synthetic))$",
+            pattern=r"^(menu|about|support|terms|referral(:tiers)?|service:.+|crypto:.+|forex_(live|prop):durations|inv:report)$",
         )
     )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_message))
     application.add_error_handler(error_handler)
+
+    if application.job_queue:
+        FOUR_DAYS_SECONDS = 4 * 24 * 3600
+        application.job_queue.run_repeating(
+            subscription_expiry_job,
+            interval=FOUR_DAYS_SECONDS,
+            first=60,
+            name="subscription_expiry_check",
+        )
+
     return application
 
 
