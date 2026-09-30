@@ -1623,7 +1623,8 @@ async def show_referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• <b>Trading Subscriptions:</b> ${trading_earnings:.2f} USDT\n"
         f"• <b>Private Investment Profits:</b> ${investment_earnings:.2f} USDT\n"
         f"• <b>Total Verified Earnings:</b> <b>${total_earnings:.2f} USDT</b>\n\n"
-        "<i>Note: Commission rates and tier upgrades apply strictly to verified paid referrals.</i>"
+        "<i>Note: Commission rates and tier upgrades apply strictly to verified paid referrals.</i>\n"
+        "<b>MINIMUM WITHDRAWAL AMOUNT IS $20.00</b>"
     )
     buttons = [
         [InlineKeyboardButton("📋 Copy Referral Link", copy_text=CopyTextButton(text=referral_link))],
