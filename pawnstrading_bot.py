@@ -125,8 +125,8 @@ SERVICE_NAMES = {
 CRYPTO_BINGX_FEES = {
     "1m": Decimal("40"),
     "3m": Decimal("90"),
-    "6m": Decimal("200"),
-    "12m": Decimal("300"),
+    "6m": Decimal("150"),
+    "12m": Decimal("200"),
 }
 
 CRYPTO_STANDARD_FEES = {
@@ -152,7 +152,7 @@ DURATION_DAYS = {
 }
 
 SERVICE_FEES = {
-    "crypto": "$40 - $300 (BingX) / $70 - $300 (Other Exchanges)",
+    "crypto": "$40 - $200 (BingX) / $70 - $300 (Other Exchanges)",
     "forex_live": "$50 - $200 depending on duration",
     "forex_prop": "$50 - $200 depending on duration (separate from challenge fees)",
     "synthetic": "Coming soon",
@@ -224,6 +224,7 @@ USER_COMMANDS = [
     BotCommand("referral", "View referral program"),
     BotCommand("support", "Contact support (@Moyin_13)"),
     BotCommand("terms", "View terms and risk disclosure"),
+    BotCommand("about", "About PAWNS & official channel"),
     BotCommand("myid", "Check your Telegram ID & status"),
     BotCommand("cancel", "Cancel current registration"),
 ]
@@ -1283,8 +1284,8 @@ async def show_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Access high-accuracy PAWNS crypto futures trading signals and updates.\n\n"
         "<b>Available Tracks:</b>\n"
-        "• <b>BingX Users:</b> Special discounted pricing from <b>$40/month</b> to <b>$300/year</b>.\n"
-        "• <b>Other Exchanges:</b> Standard pricing from <b>$100/month</b>.\n\n"
+        "• <b>BingX Users:</b> Special discounted pricing from <b>$40/month</b> to <b>$200/year</b>.\n"
+        "• <b>Other Exchanges:</b> Standard pricing from <b>$70/month</b>.\n\n"
         "Select an option below to proceed:"
     )
     support_url = await get_link(context, "support")
@@ -1306,8 +1307,8 @@ async def show_crypto_fees(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "⚡ <b>BingX Registered Users (Discounted Rates):</b>\n"
         "• 1 Month: <b>$40</b>\n"
         "• 3 Months: <b>$90</b>\n"
-        "• 6 Months: <b>$200</b>\n"
-        "• 1 Year: <b>$300</b>\n\n"
+        "• 6 Months: <b>$150</b>\n"
+        "• 1 Year: <b>$200</b>\n\n"
         "🌐 <b>Other Exchanges (Standard Rates):</b>\n"
         "• 1 Month: <b>$70</b>\n"
         "• 3 Months: <b>$149.9</b>\n"
@@ -1340,8 +1341,8 @@ async def show_crypto_bingx(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         buttons = [
             [InlineKeyboardButton("1 Month — $40", callback_data="cf_pay:bingx:1m")],
             [InlineKeyboardButton("3 Months — $90", callback_data="cf_pay:bingx:3m")],
-            [InlineKeyboardButton("6 Months — $200", callback_data="cf_pay:bingx:6m")],
-            [InlineKeyboardButton("1 Year — $300", callback_data="cf_pay:bingx:12m")],
+            [InlineKeyboardButton("6 Months — $150", callback_data="cf_pay:bingx:6m")],
+            [InlineKeyboardButton("1 Year — $200", callback_data="cf_pay:bingx:12m")],
             [InlineKeyboardButton("⬅️ Back", callback_data="service:crypto")],
         ]
         await send_or_edit(update, text, InlineKeyboardMarkup(buttons))
@@ -1356,7 +1357,7 @@ async def show_crypto_bingx(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "<b>Steps:</b>\n"
         "1. Register on BingX using our official partner link.\n"
         "2. Submit your BingX UID for quick verification.\n"
-        "3. Once verified, unlock discounted rates (from $40/mo or $300/yr)."
+        "3. Once verified, unlock discounted rates (from $40/mo or $200/yr)."
     )
     buttons = [
         [configurable_link_button("🔗 Register on BingX", bingx_url, "bingx")],
@@ -1475,7 +1476,16 @@ async def show_synthetic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def show_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_or_edit(update, f"<b>ABOUT PAWNS</b>\n\n{html.escape(get_settings(context).about_text)}", back_keyboard())
+    channel_url = await get_link(context, "pawns_channel")
+    buttons = [
+        [configurable_link_button("📢 Join Official Channel", channel_url, "pawns_channel")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu")],
+    ]
+    await send_or_edit(
+        update,
+        f"<b>ABOUT PAWNS</b>\n\n{html.escape(get_settings(context).about_text)}",
+        InlineKeyboardMarkup(buttons),
+    )
 
 
 async def show_terms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4281,8 +4291,8 @@ async def admin_bingx_review(update: Update, context: ContextTypes.DEFAULT_TYPE)
         buttons = [
             [InlineKeyboardButton("1 Month — $40", callback_data="cf_pay:bingx:1m")],
             [InlineKeyboardButton("3 Months — $90", callback_data="cf_pay:bingx:3m")],
-            [InlineKeyboardButton("6 Months — $200", callback_data="cf_pay:bingx:6m")],
-            [InlineKeyboardButton("1 Year — $300", callback_data="cf_pay:bingx:12m")],
+            [InlineKeyboardButton("6 Months — $150", callback_data="cf_pay:bingx:6m")],
+            [InlineKeyboardButton("1 Year — $200", callback_data="cf_pay:bingx:12m")],
             [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")],
         ]
         user_msg = (
@@ -5195,6 +5205,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("referral", show_referral))
     application.add_handler(CommandHandler("support", show_support))
     application.add_handler(CommandHandler("terms", show_terms))
+    application.add_handler(CommandHandler("about", show_about))
     application.add_handler(CommandHandler(["id", "myid", "whoami"], cmd_my_id))
 
     # Admin commands

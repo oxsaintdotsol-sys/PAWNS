@@ -48,6 +48,7 @@ from pawnstrading_bot import (
     admin_remove_admin,
     admin_list_admins,
     show_support,
+    show_about,
     show_terms,
     show_investment_terms,
     show_forex_live,
@@ -130,11 +131,11 @@ class TestNewFeatures(unittest.TestCase):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            # BingX tiers: 1m=$40, 3m=$90, 6m=$200, 12m=$300
+            # BingX tiers: 1m=$40, 3m=$90, 6m=$150, 12m=$200
             self.assertEqual(CRYPTO_BINGX_FEES["1m"], Decimal("40"))
             self.assertEqual(CRYPTO_BINGX_FEES["3m"], Decimal("90"))
-            self.assertEqual(CRYPTO_BINGX_FEES["6m"], Decimal("200"))
-            self.assertEqual(CRYPTO_BINGX_FEES["12m"], Decimal("300"))
+            self.assertEqual(CRYPTO_BINGX_FEES["6m"], Decimal("150"))
+            self.assertEqual(CRYPTO_BINGX_FEES["12m"], Decimal("200"))
 
             # Standard tiers: 1m=$70, 3m=$149.9, 6m=$250, 12m=$300
             self.assertEqual(CRYPTO_STANDARD_FEES["1m"], Decimal("70"))
@@ -154,10 +155,15 @@ class TestNewFeatures(unittest.TestCase):
             )
             self.assertEqual(bingx_1m["amount"], "40")
 
+            bingx_6m = loop.run_until_complete(
+                get_service_payment_info(self.context, "crypto", duration="6m", track="bingx")
+            )
+            self.assertEqual(bingx_6m["amount"], "150")
+
             bingx_1yr = loop.run_until_complete(
                 get_service_payment_info(self.context, "crypto", duration="12m", track="bingx")
             )
-            self.assertEqual(bingx_1yr["amount"], "300")
+            self.assertEqual(bingx_1yr["amount"], "200")
 
             std_1m = loop.run_until_complete(
                 get_service_payment_info(self.context, "crypto", duration="1m", track="standard")
@@ -1229,6 +1235,40 @@ class TestNewFeatures(unittest.TestCase):
             # DB submission remains PENDING
             sub = loop.run_until_complete(self.db.submissions.find_one({"reference": reference}))
             self.assertEqual(sub["payment_status"], "PENDING")
+        finally:
+            loop.close()
+
+
+    def test_show_about_with_official_channel_button(self):
+        loop = asyncio.new_event_loop()
+        try:
+            update = MagicMock()
+            update.callback_query = MagicMock()
+            update.callback_query.answer = AsyncMock()
+            update.callback_query.edit_message_text = AsyncMock()
+
+            # Set pawns_channel url in settings
+            loop.run_until_complete(
+                self.db.set_setting("pawns_channel", "https://t.me/pawns_official_channel", 123456789)
+            )
+
+            loop.run_until_complete(show_about(update, self.context))
+
+            update.callback_query.edit_message_text.assert_called_once()
+            call_args = update.callback_query.edit_message_text.call_args
+            text = call_args[1]["text"]
+            markup = call_args[1]["reply_markup"]
+
+            self.assertIn("ABOUT PAWNS", text)
+            # Channel button should be above Back button
+            self.assertEqual(len(markup.inline_keyboard), 2)
+            channel_btn = markup.inline_keyboard[0][0]
+            back_btn = markup.inline_keyboard[1][0]
+
+            self.assertEqual(channel_btn.text, "📢 Join Official Channel")
+            self.assertEqual(channel_btn.url, "https://t.me/pawns_official_channel")
+            self.assertEqual(back_btn.text, "⬅️ Back")
+            self.assertEqual(back_btn.callback_data, "menu")
         finally:
             loop.close()
 
