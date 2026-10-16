@@ -74,6 +74,7 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 from telegram.warnings import PTBUserWarning
@@ -403,7 +404,11 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         token = os.getenv("BOT_TOKEN", "").strip()
-        mongo_uri = os.getenv("MONGODB_URI", "").strip()
+        mongo_uri = (
+            os.getenv("MONGODB_URI", "").strip()
+            or os.getenv("MONGO_URL", "").strip()
+            or os.getenv("MONGODB_URL", "").strip()
+        )
         if not token:
             raise RuntimeError("BOT_TOKEN is required")
         if mongo_uri.lower() in {"none", "memory", "mock", "false", "off"}:
@@ -481,10 +486,19 @@ class Settings:
             # Stable referral IDs require this value to remain unchanged in production.
             referral_secret = hashlib.sha256(token.encode("utf-8")).hexdigest()
 
+        raw_db_name = os.getenv("MONGODB_DATABASE", "").strip()
+        if not raw_db_name:
+            if mongo_uri:
+                parsed_uri = urlparse(mongo_uri)
+                if parsed_uri.path and parsed_uri.path.strip("/"):
+                    raw_db_name = parsed_uri.path.strip("/").split("?")[0]
+            if not raw_db_name:
+                raw_db_name = "pawnstrading"
+
         return cls(
             bot_token=token,
             mongodb_uri=mongo_uri,
-            database_name=os.getenv("MONGODB_DATABASE", "PAWNS").strip() or "PAWNS",
+            database_name=raw_db_name,
             admin_chat_ids=parse_admin_ids(os.getenv("ADMIN_CHAT_IDS", "")),
             referral_secret=referral_secret,
             run_mode=mode,
@@ -649,6 +663,24 @@ def _apply_update(doc: dict[str, Any], update_dict: dict[str, Any], is_insert: b
     if is_insert and "$setOnInsert" in update_dict:
         for k, v in update_dict["$setOnInsert"].items():
             _set_nested(doc, k, v)
+    if "$addToSet" in update_dict:
+        for k, v in update_dict["$addToSet"].items():
+            curr = doc.get(k)
+            if not isinstance(curr, list):
+                curr = []
+                doc[k] = curr
+            if v not in curr:
+                curr.append(v)
+    if "$push" in update_dict:
+        for k, v in update_dict["$push"].items():
+            curr = doc.get(k)
+            if not isinstance(curr, list):
+                curr = []
+                doc[k] = curr
+            curr.append(v)
+    if "$inc" in update_dict:
+        for k, v in update_dict["$inc"].items():
+            doc[k] = doc.get(k, 0) + v
 
 
 class InMemoryCollection:
@@ -764,6 +796,7 @@ class Database:
             except Exception:
                 self.db = self.client[settings.database_name]
             self.users = self.db.users
+            self.paid_users = self.db.paid_users
             self.submissions = self.db.submissions
             self.settings = self.db.settings
             self.commissions = self.db.commission_events
@@ -780,6 +813,7 @@ class Database:
         self.is_memory_mode = True
         self.client = None
         self.users = InMemoryCollection("users")
+        self.paid_users = InMemoryCollection("paid_users")
         self.submissions = InMemoryCollection("submissions")
         self.settings = InMemoryCollection("settings")
         self.commissions = InMemoryCollection("commissions")
@@ -800,7 +834,11 @@ class Database:
             await self.users.create_index("telegram_id", unique=True)
             await self.users.create_index("referral_id", unique=True)
             await self.users.create_index("referred_by")
+            await self.users.create_index("bingx_uid")
             await self.users.create_index([("referred_by", ASCENDING), ("is_paid_referral", ASCENDING)])
+            await self.paid_users.create_index("telegram_id")
+            await self.paid_users.create_index("status")
+            await self.paid_users.create_index("last_paid_at")
             await self.submissions.create_index("reference", unique=True)
             await self.submissions.create_index([("telegram_id", ASCENDING), ("created_at", ASCENDING)])
             await self.submissions.create_index("payment_status")
@@ -815,6 +853,9 @@ class Database:
             await self.bingx_verifications.create_index("telegram_id")
             await self.terminations.create_index("reference", unique=True)
             LOGGER.info("Connected to MongoDB successfully; database indexes ready")
+
+            # Populate paid_users from verified submissions
+            await self.sync_paid_users_from_submissions()
         except (ServerSelectionTimeoutError, ConnectionFailure, PyMongoError, OSError) as exc:
             LOGGER.warning(
                 "Could not connect to MongoDB at '%s' (%s). "
@@ -828,27 +869,149 @@ class Database:
         if self.client:
             await self.client.close()
 
-    async def upsert_user(self, telegram_user: Any, referral_id: str) -> dict[str, Any]:
+    async def upsert_user(
+        self,
+        telegram_user: Any,
+        referral_id: str,
+        bingx_uid: str | None = None,
+    ) -> dict[str, Any]:
         now = utc_now()
+        set_dict: dict[str, Any] = {
+            "username": telegram_user.username,
+            "telegram_display_name": telegram_user.full_name,
+            "last_seen_at": now,
+        }
+        if bingx_uid:
+            set_dict["bingx_uid"] = bingx_uid
+
         return await self.users.find_one_and_update(
             {"telegram_id": telegram_user.id},
             {
-                "$set": {
-                    "username": telegram_user.username,
-                    "telegram_display_name": telegram_user.full_name,
-                    "last_seen_at": now,
-                },
+                "$set": set_dict,
                 "$setOnInsert": {
                     "telegram_id": telegram_user.id,
                     "referral_id": referral_id,
                     "registered_at": now,
                     "referral_earnings": "0",
                     "is_paid_referral": False,
+                    "is_paid_customer": False,
+                    "bingx_uid": bingx_uid,
+                    "bingx_verified": False,
                 },
             },
             upsert=True,
             return_document=ReturnDocument.AFTER,
         )
+
+    async def record_paid_user(
+        self,
+        submission: dict[str, Any],
+        verified_by: int | str,
+        invite_link: str | None = None,
+    ) -> dict[str, Any]:
+        """Record customer in dedicated paid_users table with full service and payment details."""
+        now = utc_now()
+        telegram_id = submission["telegram_id"]
+        reference = submission["reference"]
+        service = submission.get("service", "unknown")
+        service_name = submission.get("service_name", SERVICE_NAMES.get(service, service))
+        duration_key = submission.get("duration_key", "1m")
+        duration_label = DURATION_LABELS.get(duration_key, duration_key if duration_key else "N/A")
+        amount = str(submission.get("amount", "0"))
+        currency = submission.get("currency", "USD")
+        track = submission.get("track", "standard")
+        payment_method = submission.get("payment_method", "crypto")
+
+        user_doc = await self.users.find_one({"telegram_id": telegram_id})
+
+        submitted_ids: dict[str, Any] = {}
+        if submission.get("txid"):
+            submitted_ids["txid"] = submission["txid"]
+        if submission.get("wallet_address"):
+            submitted_ids["wallet_address"] = submission["wallet_address"]
+        if submission.get("bingx_uid"):
+            submitted_ids["bingx_uid"] = submission["bingx_uid"]
+        elif user_doc and user_doc.get("bingx_uid"):
+            submitted_ids["bingx_uid"] = user_doc["bingx_uid"]
+
+        payment_entry = {
+            "reference": reference,
+            "service": service,
+            "service_name": service_name,
+            "track": track,
+            "duration_key": duration_key,
+            "duration": duration_label,
+            "amount": amount,
+            "currency": currency,
+            "payment_method": payment_method,
+            "submitted_ids": submitted_ids,
+            "verified_at": now,
+            "verified_by": verified_by,
+            "invite_link": invite_link,
+        }
+
+        paid_doc = await self.paid_users.find_one_and_update(
+            {"telegram_id": telegram_id},
+            {
+                "$set": {
+                    "telegram_username": submission.get("telegram_username") or (user_doc.get("username") if user_doc else None),
+                    "full_name": submission.get("full_name") or (user_doc.get("telegram_display_name") if user_doc else ""),
+                    "last_paid_at": now,
+                    "last_service": service,
+                    "last_service_name": service_name,
+                    "last_duration": duration_label,
+                    "last_reference": reference,
+                    "status": "active",
+                    "updated_at": now,
+                },
+                "$addToSet": {
+                    "services_purchased": service,
+                },
+                "$push": {
+                    "payment_history": payment_entry,
+                },
+                "$inc": {
+                    "total_payments_count": 1,
+                },
+                "$setOnInsert": {
+                    "telegram_id": telegram_id,
+                    "first_paid_at": now,
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+
+        await self.users.update_one(
+            {"telegram_id": telegram_id},
+            {
+                "$set": {
+                    "is_paid_customer": True,
+                    "last_paid_at": now,
+                    "updated_at": now,
+                }
+            },
+        )
+        return paid_doc or {}
+
+    async def sync_paid_users_from_submissions(self) -> int:
+        """Self-healing: populate paid_users from verified submissions."""
+        synced = 0
+        try:
+            cursor = self.submissions.find({"payment_status": {"$in": ["VERIFIED ✅", "Verified"]}})
+            async for sub in cursor:
+                tid = sub.get("telegram_id")
+                ref = sub.get("reference")
+                if not tid or not ref:
+                    continue
+                admin_id = sub.get("admin_verification_status", {}).get("admin_id", "system")
+                invite_link = sub.get("invite_link")
+                await self.record_paid_user(sub, verified_by=admin_id, invite_link=invite_link)
+                synced += 1
+        except Exception as exc:
+            LOGGER.debug("sync_paid_users_from_submissions non-fatal error: %s", exc)
+        return synced
 
     async def attribute_referral(self, telegram_id: int, referral_code: str) -> bool:
         referrer = await self.users.find_one({"referral_id": referral_code})
@@ -2740,6 +2903,13 @@ async def complete_payment_verification(
     service = updated_sub["service"]
     service_name = updated_sub.get("service_name", SERVICE_NAMES.get(service, service))
 
+    # Record paying customer in paid_users ledger
+    await db.record_paid_user(
+        submission=updated_sub,
+        verified_by=admin_user.id if admin_user else "admin",
+        invite_link=invite_link,
+    )
+
     if service == "private":
         user_message = (
             f"🎉 <b>Payment Status: VERIFIED ✅</b>\n"
@@ -3680,6 +3850,17 @@ async def admin_announcement_proceed(update: Update, context: ContextTypes.DEFAU
         if tid and isinstance(tid, int):
             user_ids.add(tid)
 
+    # Union all user IDs from paid_users and submissions to guarantee full broadcast reach
+    async for doc in db.paid_users.find({}, {"telegram_id": 1}):
+        tid = doc.get("telegram_id")
+        if tid and isinstance(tid, int):
+            user_ids.add(tid)
+
+    async for doc in db.submissions.find({}, {"telegram_id": 1}):
+        tid = doc.get("telegram_id")
+        if tid and isinstance(tid, int):
+            user_ids.add(tid)
+
     broadcast_msg = format_announcement_message(content)
 
     sent_count = 0
@@ -3760,6 +3941,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     db = get_db(context)
     users = await db.users.count_documents({})
+    paid_customers = await db.paid_users.count_documents({})
     paid_referrals = await db.users.count_documents({"is_paid_referral": True})
     pending = await db.submissions.count_documents({"payment_status": {"$in": ["PENDING", "Under Review"]}})
     verified = await db.submissions.count_documents({"payment_status": {"$in": ["VERIFIED ✅", "Verified"]}})
@@ -3768,6 +3950,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "📊 <b>PAWNS ADMIN STATS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"• <b>Registered Users:</b> {users}\n"
+        f"• <b>Paid Customers:</b> {paid_customers}\n"
         f"• <b>Verified Paid Referrals:</b> {paid_referrals}\n"
         f"• <b>Pending Review Payments:</b> {pending}\n"
         f"• <b>Verified Payments:</b> {verified}\n"
@@ -3834,6 +4017,7 @@ async def admin_settings_view(update: Update, context: ContextTypes.DEFAULT_TYPE
         "• <code>/addadmin &lt;telegram_id&gt;</code>\n"
         "• <code>/removeadmin &lt;telegram_id&gt;</code>\n"
         "• <code>/checkexpiry</code>\n"
+        "• <code>/paidusers</code> — View paid customers ledger\n"
         "• <code>/audit</code>"
     )
     keyboard = InlineKeyboardMarkup([
@@ -3849,6 +4033,46 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not await require_admin(update, context):
         return
     await admin_settings_view(update, context)
+
+
+async def admin_list_paid_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+    db = get_db(context)
+    lines = ["👥 <b>PAID CUSTOMERS DIRECTORY</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    cursor = db.paid_users.find({})
+    all_docs = []
+    async for p in cursor:
+        all_docs.append(p)
+
+    all_docs.sort(key=lambda x: str(x.get("last_paid_at") or ""), reverse=True)
+    count = 0
+    for p in all_docs[:20]:
+        count += 1
+        tid = p.get("telegram_id")
+        uname = f"@{p['telegram_username']}" if p.get("telegram_username") else p.get("full_name") or f"ID {tid}"
+        svc = p.get("last_service_name", p.get("last_service", "Unknown"))
+        dur = p.get("last_duration", "")
+        lines.append(f"• <b>{html.escape(str(uname))}</b> (<code>{tid}</code>) — {html.escape(str(svc))} [{html.escape(str(dur))}]")
+
+    if count == 0:
+        lines.append("<i>No paid customers recorded yet.</i>")
+    else:
+        total = len(all_docs)
+        lines.append(f"\n<b>Total Paid Customers:</b> {total}")
+
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def track_all_users_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global middleware: automatically saves every user who interacts with the bot into users."""
+    user = update.effective_user
+    if not user or user.is_bot:
+        return
+    try:
+        await ensure_user(update, context)
+    except Exception as exc:
+        LOGGER.debug("track_all_users_middleware non-fatal error: %s", exc)
 
 
 async def admin_set_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4260,6 +4484,10 @@ async def receive_bingx_uid(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "updated_at": now,
     }
     await db.bingx_verifications.insert_one(record)
+    await db.users.update_one(
+        {"telegram_id": user.id},
+        {"$set": {"bingx_uid": raw_uid, "bingx_submitted_at": now, "last_seen_at": now}},
+    )
 
     await message.reply_text(
         "⏳ <b>BingX UID Submitted</b>\n"
@@ -5271,6 +5499,10 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("setlink", admin_set_link))
     application.add_handler(CommandHandler("addcommission", admin_add_commission))
     application.add_handler(CommandHandler("addinvestmentprofit", admin_add_investment_profit))
+    application.add_handler(CommandHandler(["paidusers", "customers"], admin_list_paid_users))
+
+    # Global tracking middleware: ensure every user who interacts with bot is upserted into users
+    application.add_handler(TypeHandler(Update, track_all_users_middleware), group=-1)
 
     application.add_handler(
         CallbackQueryHandler(

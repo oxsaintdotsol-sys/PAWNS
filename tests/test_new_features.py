@@ -62,6 +62,8 @@ from pawnstrading_bot import (
     receive_announcement_text,
     admin_announcement_proceed,
     admin_announcement_cancel,
+    admin_list_paid_users,
+    track_all_users_middleware,
     ANNOUNCEMENT_TEXT_INPUT,
     ANNOUNCEMENT_CONFIRM,
     ADMIN_VERIFY_LINK_INPUT,
@@ -1305,6 +1307,93 @@ class TestNewFeatures(unittest.TestCase):
             self.assertEqual(channel_btn.url, "https://t.me/pawns_official_channel")
             self.assertEqual(back_btn.text, "⬅️ Back")
             self.assertEqual(back_btn.callback_data, "menu")
+        finally:
+            loop.close()
+
+    def test_paid_users_ledger_and_customer_tracking(self):
+        """Verify paid_users collection records paying customer details, submitted IDs, and marks is_paid_customer in users."""
+        loop = asyncio.new_event_loop()
+        try:
+            user_id = 987654321
+            telegram_user = MagicMock()
+            telegram_user.id = user_id
+            telegram_user.username = "paidtrader"
+            telegram_user.full_name = "Paid Trader"
+
+            # 1. Upsert initial user
+            user_doc = loop.run_until_complete(self.db.upsert_user(telegram_user, "REF123456"))
+            self.assertFalse(user_doc.get("is_paid_customer"))
+            self.assertIsNone(user_doc.get("bingx_uid"))
+
+            # 2. Record a verified payment
+            submission = {
+                "reference": "BM-20261016-11223344",
+                "telegram_id": user_id,
+                "telegram_username": "paidtrader",
+                "full_name": "Paid Trader",
+                "service": "forex_live",
+                "service_name": "Forex Live Account Trading",
+                "duration_key": "1m",
+                "amount": "27.50",
+                "currency": "USD",
+                "track": "live",
+                "payment_method": "crypto",
+                "txid": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd",
+                "wallet_address": "0x64df5b5dc83b78f2e8d0e22b33ee471848a89b67",
+            }
+            paid_rec = loop.run_until_complete(
+                self.db.record_paid_user(submission, verified_by=123456789, invite_link="https://t.me/+vipinvite123")
+            )
+            self.assertEqual(paid_rec["telegram_id"], user_id)
+            self.assertEqual(paid_rec["last_service"], "forex_live")
+            self.assertEqual(paid_rec["total_payments_count"], 1)
+            self.assertIn("forex_live", paid_rec["services_purchased"])
+            self.assertEqual(len(paid_rec["payment_history"]), 1)
+            self.assertEqual(paid_rec["payment_history"][0]["submitted_ids"]["txid"], submission["txid"])
+
+            # 3. Check that users table was updated with is_paid_customer=True
+            updated_user = loop.run_until_complete(self.db.users.find_one({"telegram_id": user_id}))
+            self.assertTrue(updated_user["is_paid_customer"])
+
+            # 4. Check paid_users collection count
+            paid_count = loop.run_until_complete(self.db.paid_users.count_documents({}))
+            self.assertEqual(paid_count, 1)
+        finally:
+            loop.close()
+
+    def test_track_all_users_middleware_and_bingx_uid_slot(self):
+        """Verify global tracking middleware saves any user interacting with the bot and captures bingx_uid."""
+        loop = asyncio.new_event_loop()
+        try:
+            new_user_id = 5566778899
+            update = MagicMock()
+            user = MagicMock()
+            user.id = new_user_id
+            user.username = "randomuser"
+            user.full_name = "Random User"
+            user.is_bot = False
+            update.effective_user = user
+
+            # Middleware executes
+            loop.run_until_complete(track_all_users_middleware(update, self.context))
+
+            # User must be present in users collection
+            doc = loop.run_until_complete(self.db.users.find_one({"telegram_id": new_user_id}))
+            self.assertIsNotNone(doc)
+            self.assertEqual(doc["telegram_id"], new_user_id)
+            self.assertIn("bingx_uid", doc)
+
+            # Test BingX UID submission updates users table
+            msg_update = MagicMock()
+            msg_update.effective_user = user
+            msg = MagicMock()
+            msg.text = "BINGX123456"
+            msg.reply_text = AsyncMock()
+            msg_update.effective_message = msg
+
+            loop.run_until_complete(receive_bingx_uid(msg_update, self.context))
+            doc_after_uid = loop.run_until_complete(self.db.users.find_one({"telegram_id": new_user_id}))
+            self.assertEqual(doc_after_uid.get("bingx_uid"), "BINGX123456")
         finally:
             loop.close()
 
