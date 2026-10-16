@@ -17,6 +17,9 @@ from pawnstrading_bot import (
     CRYPTO_BINGX_FEES,
     CRYPTO_STANDARD_FEES,
     FOREX_FEES,
+    LAGOS_TZ,
+    PROMO_FX_1M_END_WAT,
+    is_forex_promo_active,
     Database,
     Settings,
     admin_confirm_terminate,
@@ -143,8 +146,9 @@ class TestNewFeatures(unittest.TestCase):
             self.assertEqual(CRYPTO_STANDARD_FEES["6m"], Decimal("250"))
             self.assertEqual(CRYPTO_STANDARD_FEES["12m"], Decimal("300"))
 
-            # Forex tiers: 1m=$50, 3m=$70, 6m=$150, 12m=$200
-            self.assertEqual(FOREX_FEES["1m"], Decimal("50"))
+            # Forex tiers: 1m=$50 (or $27.50 during active Friday promo), 3m=$70, 6m=$150, 12m=$200
+            expected_1m_fee = Decimal("27.50") if is_forex_promo_active() else Decimal("50")
+            self.assertEqual(FOREX_FEES["1m"], expected_1m_fee)
             self.assertEqual(FOREX_FEES["3m"], Decimal("70"))
             self.assertEqual(FOREX_FEES["6m"], Decimal("150"))
             self.assertEqual(FOREX_FEES["12m"], Decimal("200"))
@@ -170,6 +174,12 @@ class TestNewFeatures(unittest.TestCase):
             )
             self.assertEqual(std_1m["amount"], "70")
 
+            forex_live_1m = loop.run_until_complete(
+                get_service_payment_info(self.context, "forex_live", duration="1m")
+            )
+            expected_1m_str = "27.50" if is_forex_promo_active() else "50"
+            self.assertEqual(forex_live_1m["amount"], expected_1m_str)
+
             forex_live_3m = loop.run_until_complete(
                 get_service_payment_info(self.context, "forex_live", duration="3m")
             )
@@ -181,6 +191,32 @@ class TestNewFeatures(unittest.TestCase):
             self.assertEqual(forex_prop_6m["amount"], "150")
         finally:
             loop.close()
+
+    def test_forex_friday_promo_discount_and_auto_expiry(self):
+        """Verify 45% Friday discount for Forex 1 Month ($27.50 in WAT) and automatic reversion after deadline."""
+        from datetime import datetime
+        from unittest.mock import patch
+
+        # 1. During promo period (Friday Oct 16, 2026 07:33 WAT)
+        during_promo = datetime(2026, 10, 16, 7, 33, 0, tzinfo=LAGOS_TZ)
+        self.assertTrue(is_forex_promo_active(during_promo))
+
+        # 2. At Sunday Oct 18, 2026 23:59:59 WAT (deadline)
+        at_deadline = datetime(2026, 10, 18, 23, 59, 59, tzinfo=LAGOS_TZ)
+        self.assertTrue(is_forex_promo_active(at_deadline))
+
+        # 3. Exactly past deadline (Monday Oct 19, 2026 00:00:00 WAT)
+        after_deadline = datetime(2026, 10, 19, 0, 0, 0, tzinfo=LAGOS_TZ)
+        self.assertFalse(is_forex_promo_active(after_deadline))
+
+        # 4. Verify FOREX_FEES dynamically returns $27.50 during promo and $50 after
+        with patch("pawnstrading_bot.is_forex_promo_active", return_value=True):
+            self.assertEqual(FOREX_FEES["1m"], Decimal("27.50"))
+            self.assertEqual(FOREX_FEES.get("1m"), Decimal("27.50"))
+
+        with patch("pawnstrading_bot.is_forex_promo_active", return_value=False):
+            self.assertEqual(FOREX_FEES["1m"], Decimal("50"))
+            self.assertEqual(FOREX_FEES.get("1m"), Decimal("50"))
 
     def test_naira_payment_calculation_and_admin_rate(self):
         """Verify Naira payment screen calculation and dynamic rate update via admin command."""

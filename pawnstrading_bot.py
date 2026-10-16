@@ -46,6 +46,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+try:
+    from zoneinfo import ZoneInfo
+    LAGOS_TZ = ZoneInfo("Africa/Lagos")
+except Exception:
+    LAGOS_TZ = timezone(timedelta(hours=1))
+
 from pymongo import ASCENDING, AsyncMongoClient, ReturnDocument
 from pymongo.errors import ConnectionFailure, PyMongoError, ServerSelectionTimeoutError
 from pymongo.server_api import ServerApi
@@ -136,12 +142,47 @@ CRYPTO_STANDARD_FEES = {
     "12m": Decimal("300"),
 }
 
-FOREX_FEES = {
+# Friday Promo: 45% OFF Forex 1 Month ($50 -> $27.50), ends Sunday 18th Oct 2026 at 11:59:59 PM WAT (Africa/Lagos)
+PROMO_FX_1M_END_WAT = datetime(2026, 10, 18, 23, 59, 59, tzinfo=LAGOS_TZ)
+
+
+def is_forex_promo_active(now_dt: datetime | None = None) -> bool:
+    """Check if the Forex 45% discount promo is currently active in WAT (Africa/Lagos)."""
+    if now_dt is None:
+        now_dt = datetime.now(LAGOS_TZ)
+    elif now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=LAGOS_TZ)
+    return now_dt <= PROMO_FX_1M_END_WAT
+
+
+class ForexFeesDict(dict):
+    """Forex fee schedule with automatic time-based promo discount support."""
+
+    def __getitem__(self, key: str) -> Decimal:
+        if key == "1m" and is_forex_promo_active():
+            return Decimal("27.50")
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "1m" and is_forex_promo_active():
+            return Decimal("27.50")
+        return super().get(key, default)
+
+    def items(self):
+        for k in self.keys():
+            yield k, self[k]
+
+    def values(self):
+        for k in self.keys():
+            yield self[k]
+
+
+FOREX_FEES = ForexFeesDict({
     "1m": Decimal("50"),
     "3m": Decimal("70"),
     "6m": Decimal("150"),
     "12m": Decimal("200"),
-}
+})
 
 DURATION_DAYS = {
     "1m": 30,
@@ -1454,8 +1495,12 @@ async def show_forex_durations(update: Update, context: ContextTypes.DEFAULT_TYP
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Choose your subscription period to proceed to payment:"
     )
+    if is_forex_promo_active():
+        m1_btn_text = "1 Month — $27.50 (🔥 45% OFF)"
+    else:
+        m1_btn_text = "1 Month — $50"
     buttons = [
-        [InlineKeyboardButton("1 Month — $50", callback_data=f"forex_pay:{forex_type}:1m")],
+        [InlineKeyboardButton(m1_btn_text, callback_data=f"forex_pay:{forex_type}:1m")],
         [InlineKeyboardButton("3 Months — $70", callback_data=f"forex_pay:{forex_type}:3m")],
         [InlineKeyboardButton("6 Months — $150", callback_data=f"forex_pay:{forex_type}:6m")],
         [InlineKeyboardButton("1 Year — $200", callback_data=f"forex_pay:{forex_type}:12m")],
