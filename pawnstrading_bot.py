@@ -777,14 +777,17 @@ class Database:
     def __init__(self, settings: Settings) -> None:
         self._bot_settings = settings
         self.client: AsyncMongoClient | None = None
+        self.startup_error: str | None = None
         raw_uri = (settings.mongodb_uri or "").strip().strip("\"'")
         self.is_memory_mode = not bool(raw_uri)
         if not self.is_memory_mode:
-            timeout_ms = int(os.getenv("MONGODB_TIMEOUT_MS", "5000"))
+            timeout_ms = int(os.getenv("MONGODB_TIMEOUT_MS", "30000"))
             client_kwargs: dict[str, Any] = {
                 "retryWrites": True,
                 "appname": "PAWNS-telegram-bot",
                 "serverSelectionTimeoutMS": timeout_ms,
+                "connectTimeoutMS": timeout_ms,
+                "socketTimeoutMS": 30000,
             }
             if raw_uri.startswith("mongodb+srv://") or os.getenv("MONGODB_SERVER_API", "").lower() in ("true", "1"):
                 client_kwargs["server_api"] = ServerApi("1")
@@ -857,9 +860,10 @@ class Database:
             # Populate paid_users from verified submissions
             await self.sync_paid_users_from_submissions()
         except (ServerSelectionTimeoutError, ConnectionFailure, PyMongoError, OSError) as exc:
-            LOGGER.warning(
-                "Could not connect to MongoDB at '%s' (%s). "
-                "Falling back to IN-MEMORY storage for testing (data will NOT persist across restarts).",
+            self.startup_error = str(exc)
+            LOGGER.critical(
+                "CRITICAL: Failed to connect to MongoDB at '%s' (%s). "
+                "Falling back to IN-MEMORY storage to keep the bot operational.",
                 self._bot_settings.mongodb_uri,
                 exc,
             )
@@ -3946,9 +3950,15 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     pending = await db.submissions.count_documents({"payment_status": {"$in": ["PENDING", "Under Review"]}})
     verified = await db.submissions.count_documents({"payment_status": {"$in": ["VERIFIED ✅", "Verified"]}})
     rejected = await db.submissions.count_documents({"payment_status": {"$in": ["REJECTED", "Rejected"]}})
+    storage_desc = (
+        f"🟢 MongoDB Atlas (<code>{db.db.name}</code>)"
+        if not db.is_memory_mode and db.client
+        else "🔴 IN-MEMORY (RAM - NOT SAVED TO DB)"
+    )
     text = (
         "📊 <b>PAWNS ADMIN STATS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Storage:</b> {storage_desc}\n"
         f"• <b>Registered Users:</b> {users}\n"
         f"• <b>Paid Customers:</b> {paid_customers}\n"
         f"• <b>Verified Paid Referrals:</b> {paid_referrals}\n"
@@ -5258,15 +5268,59 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         except TelegramError:
             pass
 
+    # If the error is database-related, alert administrators immediately
+    if isinstance(context.error, (PyMongoError, ServerSelectionTimeoutError, ConnectionFailure)):
+        try:
+            settings = get_settings(context)
+            err_text = (
+                "🚨 <b>CRITICAL DATABASE RUNTIME ERROR</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "A live MongoDB Atlas operation failed during execution.\n\n"
+                f"<b>Error:</b>\n<code>{html.escape(str(context.error)[:500])}</code>"
+            )
+            for admin_id in settings.admin_chat_ids:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=err_text,
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
+        except Exception as alert_exc:
+            LOGGER.error("Could not dispatch critical DB alert to admins: %s", alert_exc)
+
 
 async def post_init(application: Application) -> None:
     db: Database = application.bot_data["db"]
+    settings: Settings = application.bot_data["settings"]
     await db.initialize()
+
+    # If DB initialization failed, notify admins immediately while keeping the bot operational in-memory
+    if db.is_memory_mode and getattr(db, "startup_error", None):
+        alert_msg = (
+            "🚨 <b>CRITICAL SYSTEM ALERT — IN-MEMORY FALLBACK ACTIVE</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "The PAWNS bot could not connect to MongoDB Atlas on startup.\n\n"
+            f"<b>Error Details:</b>\n<code>{html.escape(db.startup_error[:500])}</code>\n\n"
+            "⚠️ <b>Status:</b> The bot is running in <b>IN-MEMORY mode</b> so service remains online, "
+            "but <b>data will NOT persist across restarts</b> until the MongoDB connection is restored.\n\n"
+            "Action Required: Check MongoDB Atlas Network Access (0.0.0.0/0) and Railway <code>MONGODB_URI</code>."
+        )
+        for admin_id in settings.admin_chat_ids:
+            try:
+                await application.bot.send_message(
+                    chat_id=admin_id,
+                    text=alert_msg,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as notify_err:
+                LOGGER.error("Could not send startup DB alert to admin %s: %s", admin_id, notify_err)
+
     me = await application.bot.get_me()
     application.bot_data["bot_username"] = me.username
 
     # Sync database admins
-    settings: Settings = application.bot_data["settings"]
     admins = set(settings.admin_chat_ids)
     try:
         cursor = db.users.find({"is_admin": True})
