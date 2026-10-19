@@ -136,19 +136,22 @@ class TestNewFeatures(unittest.TestCase):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            # BingX tiers: 1m=$40, 3m=$90, 6m=$150, 12m=$200
+            # BingX tiers: 1w=$10, 1m=$40, 3m=$90, 6m=$150, 12m=$200
+            self.assertEqual(CRYPTO_BINGX_FEES["1w"], Decimal("10"))
             self.assertEqual(CRYPTO_BINGX_FEES["1m"], Decimal("40"))
             self.assertEqual(CRYPTO_BINGX_FEES["3m"], Decimal("90"))
             self.assertEqual(CRYPTO_BINGX_FEES["6m"], Decimal("150"))
             self.assertEqual(CRYPTO_BINGX_FEES["12m"], Decimal("200"))
 
-            # Standard tiers: 1m=$70, 3m=$149.9, 6m=$250, 12m=$300
+            # Standard tiers: 1w=$20, 1m=$70, 3m=$149.9, 6m=$250, 12m=$300
+            self.assertEqual(CRYPTO_STANDARD_FEES["1w"], Decimal("20"))
             self.assertEqual(CRYPTO_STANDARD_FEES["1m"], Decimal("70"))
             self.assertEqual(CRYPTO_STANDARD_FEES["3m"], Decimal("149.9"))
             self.assertEqual(CRYPTO_STANDARD_FEES["6m"], Decimal("250"))
             self.assertEqual(CRYPTO_STANDARD_FEES["12m"], Decimal("300"))
 
-            # Forex tiers: 1m=$50 (or $27.50 during active Friday promo), 3m=$70, 6m=$150, 12m=$200
+            # Forex tiers: 1w=$15, 1m=$50 (or $27.50 during active Friday promo), 3m=$70, 6m=$150, 12m=$200
+            self.assertEqual(FOREX_FEES["1w"], Decimal("15"))
             expected_1m_fee = Decimal("27.50") if is_forex_promo_active() else Decimal("50")
             self.assertEqual(FOREX_FEES["1m"], expected_1m_fee)
             self.assertEqual(FOREX_FEES["3m"], Decimal("70"))
@@ -156,6 +159,21 @@ class TestNewFeatures(unittest.TestCase):
             self.assertEqual(FOREX_FEES["12m"], Decimal("200"))
 
             # Verify get_service_payment_info returns correct tier
+            bingx_1w = loop.run_until_complete(
+                get_service_payment_info(self.context, "crypto", duration="1w", track="bingx")
+            )
+            self.assertEqual(bingx_1w["amount"], "10")
+
+            std_1w = loop.run_until_complete(
+                get_service_payment_info(self.context, "crypto", duration="1w", track="standard")
+            )
+            self.assertEqual(std_1w["amount"], "20")
+
+            forex_live_1w = loop.run_until_complete(
+                get_service_payment_info(self.context, "forex_live", duration="1w")
+            )
+            self.assertEqual(forex_live_1w["amount"], "15")
+
             bingx_1m = loop.run_until_complete(
                 get_service_payment_info(self.context, "crypto", duration="1m", track="bingx")
             )

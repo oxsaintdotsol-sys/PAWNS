@@ -130,6 +130,7 @@ SERVICE_NAMES = {
 
 # Crypto Futures Fee Schedules
 CRYPTO_BINGX_FEES = {
+    "1w": Decimal("10"),
     "1m": Decimal("40"),
     "3m": Decimal("90"),
     "6m": Decimal("150"),
@@ -137,6 +138,7 @@ CRYPTO_BINGX_FEES = {
 }
 
 CRYPTO_STANDARD_FEES = {
+    "1w": Decimal("20"),
     "1m": Decimal("70"),
     "3m": Decimal("149.9"),
     "6m": Decimal("250"),
@@ -179,6 +181,7 @@ class ForexFeesDict(dict):
 
 
 FOREX_FEES = ForexFeesDict({
+    "1w": Decimal("15"),
     "1m": Decimal("50"),
     "3m": Decimal("70"),
     "6m": Decimal("150"),
@@ -186,6 +189,7 @@ FOREX_FEES = ForexFeesDict({
 })
 
 DURATION_DAYS = {
+    "1w": 7,
     "1m": 30,
     "2m": 60,
     "3m": 90,
@@ -194,9 +198,9 @@ DURATION_DAYS = {
 }
 
 SERVICE_FEES = {
-    "crypto": "$40 - $200 (BingX) / $70 - $300 (Other Exchanges)",
-    "forex_live": "$50 - $200 depending on duration",
-    "forex_prop": "$50 - $200 depending on duration (separate from challenge fees)",
+    "crypto": "$10 - $200 (BingX) / $20 - $300 (Other Exchanges)",
+    "forex_live": "$15 - $200 depending on duration",
+    "forex_prop": "$15 - $200 depending on duration (separate from challenge fees)",
     "synthetic": "Coming soon",
 }
 
@@ -206,6 +210,7 @@ INVESTMENT_PLANS = {
 }
 
 DURATION_LABELS = {
+    "1w": "1 week",
     "1m": "1 month",
     "2m": "2 months",
     "3m": "3 months",
@@ -1513,11 +1518,13 @@ async def show_crypto_fees(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "📊 <b>CRYPTO FUTURES SERVICE FEES</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "⚡ <b>BingX Registered Users (Discounted Rates):</b>\n"
+        "• 1 Week: <b>$10</b>\n"
         "• 1 Month: <b>$40</b>\n"
         "• 3 Months: <b>$90</b>\n"
         "• 6 Months: <b>$150</b>\n"
         "• 1 Year: <b>$200</b>\n\n"
         "🌐 <b>Other Exchanges (Standard Rates):</b>\n"
+        "• 1 Week: <b>$20</b>\n"
         "• 1 Month: <b>$70</b>\n"
         "• 3 Months: <b>$149.9</b>\n"
         "• 6 Months: <b>$250</b>\n"
@@ -1547,6 +1554,7 @@ async def show_crypto_bingx(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "Choose your discounted subscription duration:"
         )
         buttons = [
+            [InlineKeyboardButton("1 Week — $10", callback_data="cf_pay:bingx:1w")],
             [InlineKeyboardButton("1 Month — $40", callback_data="cf_pay:bingx:1m")],
             [InlineKeyboardButton("3 Months — $90", callback_data="cf_pay:bingx:3m")],
             [InlineKeyboardButton("6 Months — $150", callback_data="cf_pay:bingx:6m")],
@@ -1565,7 +1573,7 @@ async def show_crypto_bingx(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "<b>Steps:</b>\n"
         "1. Register on BingX using our official partner link.\n"
         "2. Submit your BingX UID for quick verification.\n"
-        "3. Once verified, unlock discounted rates (from $40/mo or $200/yr)."
+        "3. Once verified, unlock discounted rates (from $10/wk, $40/mo or $200/yr)."
     )
     buttons = [
         [configurable_link_button("🔗 Register on BingX", bingx_url, "bingx")],
@@ -1585,6 +1593,7 @@ async def show_crypto_standard(update: Update, context: ContextTypes.DEFAULT_TYP
         "Choose your subscription duration below to proceed to payment:"
     )
     buttons = [
+        [InlineKeyboardButton("1 Week — $20", callback_data="cf_pay:standard:1w")],
         [InlineKeyboardButton("1 Month — $70", callback_data="cf_pay:standard:1m")],
         [InlineKeyboardButton("3 Months — $149.9", callback_data="cf_pay:standard:3m")],
         [InlineKeyboardButton("6 Months — $250", callback_data="cf_pay:standard:6m")],
@@ -1667,6 +1676,7 @@ async def show_forex_durations(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         m1_btn_text = "1 Month — $50"
     buttons = [
+        [InlineKeyboardButton("1 Week — $15", callback_data=f"forex_pay:{forex_type}:1w")],
         [InlineKeyboardButton(m1_btn_text, callback_data=f"forex_pay:{forex_type}:1m")],
         [InlineKeyboardButton("3 Months — $70", callback_data=f"forex_pay:{forex_type}:3m")],
         [InlineKeyboardButton("6 Months — $150", callback_data=f"forex_pay:{forex_type}:6m")],
@@ -4572,6 +4582,7 @@ async def admin_bingx_review(update: Update, context: ContextTypes.DEFAULT_TYPE)
             pass
 
         buttons = [
+            [InlineKeyboardButton("1 Week — $10", callback_data="cf_pay:bingx:1w")],
             [InlineKeyboardButton("1 Month — $40", callback_data="cf_pay:bingx:1m")],
             [InlineKeyboardButton("3 Months — $90", callback_data="cf_pay:bingx:3m")],
             [InlineKeyboardButton("6 Months — $150", callback_data="cf_pay:bingx:6m")],
@@ -5379,8 +5390,8 @@ def build_application(settings: Settings) -> Application:
     registration = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(registration_start, pattern=r"^register:(private|crypto|forex_live|forex_prop|synthetic)$"),
-            CallbackQueryHandler(crypto_pay_start, pattern=r"^cf_pay:(bingx|standard):(1m|3m|6m|12m)$"),
-            CallbackQueryHandler(forex_pay_start, pattern=r"^forex_pay:(live|prop):(1m|3m|6m|12m)$"),
+            CallbackQueryHandler(crypto_pay_start, pattern=r"^cf_pay:(bingx|standard):(1w|1m|3m|6m|12m)$"),
+            CallbackQueryHandler(forex_pay_start, pattern=r"^forex_pay:(live|prop):(1w|1m|3m|6m|12m)$"),
             CallbackQueryHandler(onboard_start, pattern=r"^onboard_start:BM-\d{8}-[A-F0-9]{8}$"),
         ],
         states={
